@@ -12,4 +12,17 @@
     <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.9" PrivateAssets="all" />
   </ItemGroup>
 
+  <!-- Rewrite the base href for GitHub Pages at publish time only. Local dev keeps "/". -->
+  <Target Name="RewriteBaseHrefForGitHubPages" AfterTargets="Publish" Condition="'$(Configuration)' == 'Release'">
+    <PropertyGroup>
+      <_PublishedIndexHtml>$(PublishDir)wwwroot/index.html</_PublishedIndexHtml>
+      <_BaseHrefSearch>&lt;base href="/" /&gt;</_BaseHrefSearch>
+      <_BaseHrefReplace>&lt;base href="/Rhythm-Game-In-browser-thing/" /&gt;</_BaseHrefReplace>
+      <_IndexHtmlContent>$([System.IO.File]::ReadAllText('$(_PublishedIndexHtml)'))</_IndexHtmlContent>
+      <_IndexHtmlContent>$(_IndexHtmlContent.Replace('$(_BaseHrefSearch)', '$(_BaseHrefReplace)'))</_IndexHtmlContent>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(_PublishedIndexHtml)" Lines="$(_IndexHtmlContent)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <Message Importance="high" Text="Rewrote base href in $(_PublishedIndexHtml) to /Rhythm-Game-In-browser-thing/" />
+  </Target>
+
 </Project>

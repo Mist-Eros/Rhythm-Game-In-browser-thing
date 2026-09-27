@@ -1,0 +1,122 @@
+@using RiffGame.Interop
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+@inject NavigationManager Navigation
+
+<h2>Audio test</h2>
+
+<p class="text-muted">
+    Click any button first — browsers block audio until a user gesture.
+</p>
+
+<div class="d-flex flex-wrap gap-2 mb-3">
+    @foreach (var instrument in Instruments)
+    {
+        <button class="btn btn-primary" @onclick="() => PlayNoteAsync(instrument)">
+            @instrument
+        </button>
+    }
+</div>
+
+<div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+    <button class="btn btn-success" @onclick="StartMetronomeAsync">Start metronome</button>
+    <button class="btn btn-danger" @onclick="StopAsync">Stop</button>
+    <span class="ms-2 font-monospace">Transport: @_transportTime.ToString("F2") s</span>
+</div>
+
+@code {
+    private static readonly string[] Instruments =
+        ["kick", "snare", "hihat", "bass", "guitar", "piano", "musicbox"];
+
+    private const double DefaultNoteDurationSec = 0.5;
+    private const double MetronomeBpm = 120;
+    private const int MetronomeBeats = 8;
+
+    private AudioInterop _audio = default!;
+    private System.Timers.Timer? _pollTimer;
+    private CancellationTokenSource? _metronomeCts;
+    private double _transportTime;
+
+    protected override void OnInitialized()
+    {
+        _audio = new AudioInterop(JS, Navigation);
+        _pollTimer = new System.Timers.Timer(100) { AutoReset = true };
+        _pollTimer.Elapsed += async (_, _) => await PollTransportAsync();
+        _pollTimer.Start();
+    }
+
+    private async Task PlayNoteAsync(string instrument)
+    {
+        await _audio.InitAsync();
+        await _audio.PlayInstrumentAsync(instrument, "C4", DefaultNoteDurationSec);
+    }
+
+    private async Task StartMetronomeAsync()
+    {
+        await _audio.InitAsync();
+        await _audio.SetBpmAsync(MetronomeBpm);
+        await _audio.ClearScheduledAsync();
+        await _audio.SeekTransportAsync(0);
+
+        var beatSec = 60.0 / MetronomeBpm;
+        for (var i = 0; i < MetronomeBeats; i++)
+        {
+            await _audio.PlayInstrumentAsync("kick", "C1", 0.1, i * beatSec);
+        }
+
+        await _audio.StartTransportAsync();
+
+        _metronomeCts?.Cancel();
+        _metronomeCts = new CancellationTokenSource();
+        _ = StopMetronomeAfterAsync(MetronomeBeats * beatSec, _metronomeCts.Token);
+    }
+
+    private async Task StopMetronomeAfterAsync(double delaySec, CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(delaySec + 0.3), token);
+            await InvokeAsync(StopTransportAsync);
+        }
+        catch (TaskCanceledException)
+        {
+            // Stop button already stopped the transport.
+        }
+    }
+
+    private async Task StopAsync()
+    {
+        _metronomeCts?.Cancel();
+        await _audio.StopTransportAsync();
+    }
+
+    private async Task PollTransportAsync()
+    {
+        try
+        {
+            await InvokeAsync(async () =>
+            {
+                _transportTime = await _audio.GetTransportTimeSecAsync();
+                StateHasChanged();
+            });
+        }
+        catch (JSException)
+        {
+            // Tone/module not ready yet; ignore until next tick.
+        }
+    }
+
+    private async Task StopTransportAsync()
+    {
+        await _audio.StopTransportAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _metronomeCts?.Cancel();
+        _metronomeCts?.Dispose();
+        _pollTimer?.Dispose();
+        await _audio.DisposeAsync();
+    }
+}
