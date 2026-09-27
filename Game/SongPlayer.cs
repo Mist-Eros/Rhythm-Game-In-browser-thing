@@ -34,11 +34,18 @@ public sealed class SongPlayer
             {
                 var timeSec = TimingService.BeatsToSeconds(note.Beat, Song.Bpm);
                 var durationSec = TimingService.BeatsToSeconds(note.Duration, Song.Bpm);
-                await _audio.PlayInstrumentAsync(track.Instrument, note.Pitch, durationSec, timeSec);
+                await _audio.PlayInstrumentAsync(
+                    track.Instrument, note.Pitch, durationSec, timeSec, note.Velocity);
             }
         }
 
         await _audio.StartTransportAsync();
+    }
+
+    /// <summary>Pauses the transport at the current position.</summary>
+    public async Task PauseAsync()
+    {
+        await _audio.PauseTransportAsync();
     }
 
     /// <summary>Clears scheduled events and stops the transport.</summary>

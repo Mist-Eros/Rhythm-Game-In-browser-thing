@@ -1,5 +1,11 @@
 // Tone.js wrapper exposed to C# via JS interop.
 // Tone is loaded as a UMD global by index.html (js/lib/tone.js) before this module runs.
+//
+// Drums (kick/snare/hihat) are monophonic Tone synths with short, fixed envelopes and
+// no randomization, so a hit is deterministic for a given (note, duration, velocity,
+// time). Melodic instruments are Tone.PolySynth so chords and overlapping notes
+// (within a track or across tracks) all sound. The same trigger helper is used for
+// audition and scheduled playback.
 
 const getTone = () => {
   if (!globalThis.Tone) {
@@ -11,26 +17,35 @@ const getTone = () => {
 let initialized = false;
 let instances = {};
 
-// One place to tweak every instrument. `pitched` decides whether a note name is
-// passed to triggerAttackRelease (drums ignore it and trigger on a fixed sound).
+// One place to tweak every instrument.
+// - `pitched`: whether the model's note name sets the synth pitch.
+// - `trigger`: optional explicit call, for synths whose trigger signature differs.
+// MembraneSynth/MetalSynth take (note, duration, time, velocity); NoiseSynth takes
+// (duration, time, velocity). Drums pass a FIXED note so the model pitch is ignored,
+// which keeps them deterministic and prevents duration-as-pitch mistakes.
 const INSTRUMENTS = {
   kick: {
     pitched: false,
     create: (T) =>
       new T.MembraneSynth({
-        pitchDecay: 0.05,
-        octaves: 6,
+        pitchDecay: 0.03,
+        octaves: 4,
         oscillator: { type: "sine" },
-        envelope: { attack: 0.001, decay: 0.4, sustain: 0.01, release: 1.4 },
+        // Monophonic; sustain 0 and a 20ms release so even 1/32 hits never overlap.
+        envelope: { attack: 0.001, decay: 0.16, sustain: 0, release: 0.02 },
       }).toDestination(),
+    trigger: (inst, note, durationSec, time, velocity) =>
+      inst.triggerAttackRelease("C1", durationSec, time, velocity),
   },
   snare: {
     pitched: false,
     create: (T) =>
       new T.NoiseSynth({
         noise: { type: "white" },
-        envelope: { attack: 0.001, decay: 0.15, sustain: 0 },
+        envelope: { attack: 0.001, decay: 0.12, sustain: 0, release: 0.02 },
       }).toDestination(),
+    trigger: (inst, note, durationSec, time, velocity) =>
+      inst.triggerAttackRelease(durationSec, time, velocity),
   },
   hihat: {
     pitched: false,
@@ -40,13 +55,16 @@ const INSTRUMENTS = {
         modulationIndex: 32,
         resonance: 4000,
         octaves: 1.5,
-        envelope: { attack: 0.001, decay: 0.1, release: 0.01 },
+        envelope: { attack: 0.001, decay: 0.06, sustain: 0, release: 0.01 },
       }).toDestination(),
+    trigger: (inst, note, durationSec, time, velocity) =>
+      inst.triggerAttackRelease("C5", durationSec, time, velocity),
   },
   bass: {
     pitched: true,
-    create: (T) =>
-      new T.MonoSynth({
+    create: (T) => {
+      const synth = new T.PolySynth(T.MonoSynth).toDestination();
+      synth.set({
         oscillator: { type: "sawtooth" },
         filter: { Q: 2, type: "lowpass" },
         envelope: { attack: 0.01, decay: 0.2, sustain: 0.4, release: 0.6 },
@@ -58,32 +76,52 @@ const INSTRUMENTS = {
           baseFrequency: 200,
           octaves: 2.6,
         },
-      }).toDestination(),
+      });
+      synth.maxPolyphony = 32;
+      return synth;
+    },
   },
   guitar: {
     pitched: true,
-    create: (T) =>
-      new T.PluckSynth({ attackNoise: 1, dampening: 4000, resonance: 0.9 }).toDestination(),
+    // PolySynth only accepts Monophonic voices (Synth/FMSynth/AMSynth/MonoSynth/DuoSynth).
+    // A short plucky Synth envelope approximates a guitar; PluckSynth is NOT Monophonic.
+    create: (T) => {
+      const synth = new T.PolySynth(T.Synth).toDestination();
+      synth.set({
+        oscillator: { type: "triangle" },
+        envelope: { attack: 0.001, decay: 0.4, sustain: 0, release: 0.3 },
+      });
+      synth.maxPolyphony = 32;
+      return synth;
+    },
   },
   piano: {
     pitched: true,
-    create: (T) =>
-      new T.FMSynth({
+    create: (T) => {
+      const synth = new T.PolySynth(T.FMSynth).toDestination();
+      synth.set({
         harmonicity: 3,
         modulationIndex: 10,
         oscillator: { type: "sine" },
         envelope: { attack: 0.001, decay: 0.8, sustain: 0.05, release: 1.2 },
         modulation: { type: "square" },
         modulationEnvelope: { attack: 0.002, decay: 0.2, sustain: 0, release: 0.2 },
-      }).toDestination(),
+      });
+      synth.maxPolyphony = 32;
+      return synth;
+    },
   },
   musicbox: {
     pitched: true,
-    create: (T) =>
-      new T.Synth({
+    create: (T) => {
+      const synth = new T.PolySynth(T.Synth).toDestination();
+      synth.set({
         oscillator: { type: "triangle" },
         envelope: { attack: 0.001, decay: 0.5, sustain: 0.0, release: 0.5 },
-      }).toDestination(),
+      });
+      synth.maxPolyphony = 32;
+      return synth;
+    },
   },
 };
 
@@ -91,7 +129,12 @@ function buildInstruments() {
   const T = getTone();
   disposeInstruments();
   for (const [name, def] of Object.entries(INSTRUMENTS)) {
-    instances[name] = def.create(T);
+    // One bad instrument definition must not prevent the others from loading.
+    try {
+      instances[name] = def.create(T);
+    } catch (error) {
+      console.error(`Failed to create instrument "${name}":`, error);
+    }
   }
 }
 
@@ -102,6 +145,21 @@ function disposeInstruments() {
     }
   }
   instances = {};
+}
+
+function clampVelocity(velocity) {
+  return Number.isFinite(velocity) ? Math.max(0, Math.min(1, velocity)) : 1;
+}
+
+// The single trigger path. Audition and scheduled playback both call this.
+function triggerInstrument(def, inst, note, durationSec, time, velocity) {
+  if (def.trigger) {
+    def.trigger(inst, note, durationSec, time, velocity);
+  } else if (def.pitched) {
+    inst.triggerAttackRelease(note, durationSec, time, velocity);
+  } else {
+    inst.triggerAttackRelease(durationSec, time, velocity);
+  }
 }
 
 /**
@@ -121,12 +179,13 @@ export async function init() {
 }
 
 /**
- * Play a single note. When `timeSec` is a number it is scheduled on the Tone
- * transport (absolute seconds, sample-accurate). When omitted/null the note
- * fires immediately, which is what audition buttons want.
+ * Play a single note. When `timeSec` is a number it is scheduled once on the Tone
+ * transport (absolute seconds, sample-accurate). When omitted/null the note fires
+ * immediately, which is what audition buttons want. `velocity` is 0..1 and is
+ * applied linearly; it defaults to 1 for callers that don't supply one.
  * Returns the Tone.Transport schedule id when scheduled, otherwise null.
  */
-export function playInstrument(name, note = "C4", durationSec = 0.5, timeSec = null) {
+export function playInstrument(name, note = "C4", durationSec = 0.5, timeSec = null, velocity = 1) {
   const T = getTone();
   const def = INSTRUMENTS[name];
   if (!def) {
@@ -137,19 +196,14 @@ export function playInstrument(name, note = "C4", durationSec = 0.5, timeSec = n
     throw new Error("Audio not initialized. Call init() first.");
   }
 
-  const trigger = (time) => {
-    if (def.pitched) {
-      inst.triggerAttackRelease(note, durationSec, time);
-    } else {
-      inst.triggerAttackRelease(durationSec, time);
-    }
-  };
+  const vel = clampVelocity(velocity);
+  const fire = (time) => triggerInstrument(def, inst, note, durationSec, time, vel);
 
   if (timeSec === null || timeSec === undefined) {
-    trigger(T.now());
+    fire(T.now());
     return null;
   }
-  return T.Transport.schedule((audioTime) => trigger(audioTime), timeSec);
+  return T.Transport.scheduleOnce((audioTime) => fire(audioTime), timeSec);
 }
 
 export async function startTransport() {

@@ -19,6 +19,9 @@
     --musicbox: #f6c1ff;
 
     --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+
+    --key-strip-width: 52px;
+    --ruler-height: 22px;
 }
 
 * {
@@ -229,6 +232,16 @@ a {
     padding: 0 0.9rem;
     background: var(--bg-panel);
     border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.compose-error {
+    padding: 0.5rem 0.9rem;
+    background: color-mix(in srgb, var(--kick) 18%, var(--bg-panel));
+    border-bottom: 1px solid var(--kick);
+    color: var(--text);
+    font-size: 12px;
 }
 
 .transport .readout {
@@ -379,11 +392,52 @@ a {
     color: var(--text-dim);
 }
 
-.piano-roll-scroll {
+/*
+ * Piano roll is a 2x2 CSS grid: a fixed-size corner/ruler/keys frame around a
+ * single scrollable grid canvas. Only the grid scrolls; the ruler and key
+ * column are separate static canvases that redraw with the grid's scroll offset.
+ */
+.piano-roll {
     flex: 1;
     min-width: 0;
     min-height: 0;
+    display: grid;
+    grid-template-columns: var(--key-strip-width) 1fr;
+    grid-template-rows: var(--ruler-height) 1fr;
+    background: var(--bg);
+}
+
+.piano-roll-corner {
+    background: var(--bg-panel-2);
+    border-right: 1px solid var(--border-bright);
+    border-bottom: 1px solid var(--border-bright);
+}
+
+.piano-roll-ruler {
     position: relative;
+    min-width: 0;
+    overflow: hidden;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border-bright);
+}
+
+.piano-roll-keys {
+    position: relative;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border-bright);
+}
+
+.piano-roll-ruler canvas,
+.piano-roll-keys canvas {
+    display: block;
+}
+
+.piano-roll-scroll {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
     overflow: auto;
     background: var(--bg);
 }
@@ -393,12 +447,17 @@ a {
     position: relative;
 }
 
-/* Sticky so it stays pinned to the scroll viewport while the spacer scrolls. */
-.piano-roll-canvas {
+/* The grid canvas contains only the grid. Sticky so it stays pinned while
+   the spacer scrolls; drawing offsets by scrollLeft/scrollTop. */
+.piano-roll-grid-canvas {
     position: sticky;
     top: 0;
     left: 0;
     display: block;
+    cursor: crosshair;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
 }
 
 /* ---- utility ---- */

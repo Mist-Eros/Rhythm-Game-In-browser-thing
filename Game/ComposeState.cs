@@ -15,25 +15,84 @@ public static class SnapOptions
     ];
 }
 
-/// <summary>Editor state for the Compose page. UI-only for now; no note editing yet.</summary>
+/// <summary>Editor state for the Compose page: the working song plus view/transport state.</summary>
 public sealed class ComposeState
 {
+    public Song WorkingSong { get; set; } = CreateEmpty();
+
     public string SelectedInstrument { get; set; } = InstrumentNames.Piano;
-    public double Bpm { get; set; } = 120;
+    public double CurrentBeat { get; set; }
+    public bool IsPlaying { get; set; }
 
     /// <summary>Grid subdivisions per beat (1=1/4, 2=1/8, 4=1/16, 8=1/32).</summary>
     public int SubdivisionsPerBeat { get; set; } = 4;
 
-    public double CurrentTimeSec { get; set; }
-
     /// <summary>Fixed song length in beats; default is 60 beats (30s at 120 BPM).</summary>
     public double LengthBeats { get; set; } = 60;
 
-    /// <summary>Horizontal spacing multiplier (time axis).</summary>
     public double TimeZoom { get; set; } = 1.0;
-
-    /// <summary>Vertical spacing multiplier (pitch axis).</summary>
     public double PitchZoom { get; set; } = 1.0;
 
+    public double SnapBeats => 1.0 / SubdivisionsPerBeat;
+
+    public double Bpm
+    {
+        get => WorkingSong.Bpm;
+        set => WorkingSong = WorkingSong with { Bpm = value };
+    }
+
     public double LengthSeconds => TimingService.BeatsToSeconds(LengthBeats, Bpm);
+
+    public Track CurrentTrack =>
+        WorkingSong.Tracks.FirstOrDefault(t => t.Instrument == SelectedInstrument)
+        ?? WorkingSong.Tracks[0];
+
+    /// <summary>Replaces the working song, guaranteeing a track for every instrument.</summary>
+    public void LoadSong(Song song)
+    {
+        foreach (var name in InstrumentNames.All)
+        {
+            if (song.Tracks.All(t => t.Instrument != name))
+            {
+                song.Tracks.Add(new Track { Instrument = name });
+            }
+        }
+
+        // Normalize every note pitch into the shared piano-roll range. Blank pitches
+        // become C4; out-of-range notes (e.g. an old "C1") are clamped so they land
+        // on a visible row instead of off-grid.
+        foreach (var track in song.Tracks)
+        {
+            for (var i = 0; i < track.Notes.Count; i++)
+            {
+                var note = track.Notes[i];
+                var midi = PitchMath.TryNameToMidi(note.Pitch, out var m) ? m : 60;
+                var clamped = Math.Clamp(midi, InstrumentLayout.PitchMinMidi, InstrumentLayout.PitchMaxMidi);
+                var name = PitchMath.MidiToName(clamped);
+                if (!string.Equals(note.Pitch, name, StringComparison.Ordinal))
+                {
+                    track.Notes[i] = note with { Pitch = name };
+                }
+            }
+        }
+
+        WorkingSong = song;
+
+        if (song.Tracks.All(t => t.Instrument != SelectedInstrument))
+        {
+            SelectedInstrument = InstrumentNames.All[0];
+        }
+        CurrentBeat = 0;
+        IsPlaying = false;
+    }
+
+    public static Song CreateEmpty(string title = "Untitled")
+    {
+        var song = new Song { Title = title, Bpm = 120, BeatsPerBar = 4 };
+        foreach (var name in InstrumentNames.All)
+        {
+            song.Tracks.Add(new Track { Instrument = name });
+        }
+        return song;
+    }
 }

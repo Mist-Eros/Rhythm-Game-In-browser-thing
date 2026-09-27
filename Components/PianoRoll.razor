@@ -5,9 +5,18 @@
 @inject IJSRuntime JS
 @inject NavigationManager Navigation
 
-<div class="piano-roll-scroll">
-    <div class="piano-roll-content">
-        <canvas class="piano-roll-canvas" @ref="_canvas"></canvas>
+<div class="piano-roll" @ref="_root">
+    <div class="piano-roll-corner" aria-hidden="true"></div>
+    <div class="piano-roll-ruler">
+        <canvas></canvas>
+    </div>
+    <div class="piano-roll-keys">
+        <canvas></canvas>
+    </div>
+    <div class="piano-roll-scroll">
+        <div class="piano-roll-content">
+            <canvas class="piano-roll-grid-canvas"></canvas>
+        </div>
     </div>
 </div>
 
@@ -18,21 +27,32 @@
     [Parameter] public int BeatsPerBar { get; set; } = 4;
     [Parameter] public double TimeZoom { get; set; } = 1.0;
     [Parameter] public double PitchZoom { get; set; } = 1.0;
+    [Parameter] public double PlayheadBeat { get; set; }
+    [Parameter] public int Revision { get; set; }
+    [Parameter] public bool Debug { get; set; }
+    [Parameter] public IReadOnlyList<PianoRollNote> Notes { get; set; } = [];
 
-    /// <summary>Raised when wheel/keyboard input proposes new zoom values.</summary>
     [Parameter] public EventCallback<ZoomChange> OnZoomChanged { get; set; }
+    [Parameter] public EventCallback<NotePlacement> OnNotePlaced { get; set; }
+    [Parameter] public EventCallback<NoteMove> OnNoteMoved { get; set; }
+    [Parameter] public EventCallback<int> OnNoteDeleted { get; set; }
 
-    private ElementReference _canvas;
+    private ElementReference _root;
     private PianoRollInterop _interop = default!;
     private DotNetObjectReference<PianoRollCallbacks>? _callbacksRef;
     private bool _initialized;
     private string _configKey = "";
+    private double _lastPlayhead = double.NaN;
 
     protected override void OnInitialized()
     {
         _interop = new PianoRollInterop(JS, Navigation);
-        _callbacksRef = DotNetObjectReference.Create(
-            new PianoRollCallbacks(HandleZoomStep, HandleZoomReset));
+        _callbacksRef = DotNetObjectReference.Create(new PianoRollCallbacks(
+            HandleZoomStep,
+            HandleZoomReset,
+            (beat, midi) => OnNotePlaced.InvokeAsync(new NotePlacement(beat, midi)),
+            (index, beat, midi) => OnNoteMoved.InvokeAsync(new NoteMove(index, beat, midi)),
+            index => OnNoteDeleted.InvokeAsync(index)));
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -41,35 +61,42 @@
 
         if (!_initialized)
         {
-            await _interop.InitAsync(_canvas, BuildConfig(), _callbacksRef!);
+            await _interop.InitAsync(_root, BuildConfig(), _callbacksRef!);
             _initialized = true;
             _configKey = key;
+            _lastPlayhead = PlayheadBeat;
         }
         else if (key != _configKey)
         {
             await _interop.UpdateAsync(BuildConfig());
             _configKey = key;
         }
+
+        if (_initialized && Math.Abs(PlayheadBeat - _lastPlayhead) > 1e-6)
+        {
+            await _interop.SetPlayheadAsync(PlayheadBeat);
+            _lastPlayhead = PlayheadBeat;
+        }
     }
 
     private string BuildConfigKey() =>
-        $"{Instrument}|{SubdivisionsPerBeat}|{LengthBeats}|{BeatsPerBar}|{TimeZoom}|{PitchZoom}";
+        $"{Instrument}|{SubdivisionsPerBeat}|{LengthBeats}|{BeatsPerBar}|{TimeZoom}|{PitchZoom}|{Revision}|{Debug}";
 
     private PianoRollConfig BuildConfig()
     {
-        var (min, max) = InstrumentLayout.PitchRange(Instrument);
         return new PianoRollConfig(
-            InstrumentLayout.IsDrum(Instrument),
-            min,
-            max,
+            InstrumentLayout.PitchMinMidi,
+            InstrumentLayout.PitchMaxMidi,
             LengthBeats,
             BeatsPerBar,
             SubdivisionsPerBeat,
-            InstrumentPalette.For(Instrument),
             TimeZoom,
             PitchZoom,
             PianoRollMetrics.BasePixelsPerBeat,
-            PianoRollMetrics.BasePixelsPerSemitone);
+            PianoRollMetrics.BasePixelsPerSemitone,
+            PlayheadBeat,
+            Notes,
+            Debug);
     }
 
     private async Task HandleZoomStep(string axis, int direction)

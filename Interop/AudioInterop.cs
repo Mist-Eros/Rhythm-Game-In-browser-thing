@@ -34,13 +34,14 @@ public sealed class AudioInterop : IAsyncDisposable
 
     /// <summary>
     /// Plays a single note on the named instrument. When <paramref name="timeSec"/>
-    /// is supplied it is scheduled on the Tone transport (absolute seconds,
-    /// sample-accurate); when null the note fires immediately.
+    /// is supplied it is scheduled once on the Tone transport (absolute seconds,
+    /// sample-accurate); when null the note fires immediately. <paramref name="velocity"/>
+    /// is 0..1 and applied linearly by the synth envelope.
     /// </summary>
     public async ValueTask PlayInstrumentAsync(
-        string name, string note, double durationSec, double? timeSec = null)
+        string name, string note, double durationSec, double? timeSec = null, double velocity = 1.0)
         => await (await GetModuleAsync()).InvokeVoidAsync(
-            "playInstrument", name, note, durationSec, timeSec);
+            "playInstrument", name, note, durationSec, timeSec, velocity);
 
     public async ValueTask StartTransportAsync()
         => await (await GetModuleAsync()).InvokeVoidAsync("startTransport");

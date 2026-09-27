@@ -1,18 +1,22 @@
 @page "/compose"
+@using Microsoft.AspNetCore.Components.Forms
 @using RiffGame.Components
 @using RiffGame.Game
+@using RiffGame.Interop
 @using RiffGame.Songs
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+@inject NavigationManager Navigation
 
 <PageTitle>Compose · RiffGame</PageTitle>
 
 <div class="compose">
     <div class="transport">
-        <button class="btn btn-accent @(_isPlaying ? "active" : "")" @onclick="Play">
-            @(_isPlaying ? "▶ Playing" : "▶ Play")
-        </button>
-        <button class="btn" @onclick="Stop">■ Stop</button>
+        <button class="btn btn-accent" @onclick="PlayAsync">▶ Play</button>
+        <button class="btn" @onclick="PauseAsync">❚❚ Pause</button>
+        <button class="btn" @onclick="StopAsync">■ Stop</button>
 
-        <span class="readout">@Format(_state.CurrentTimeSec) / @Format(_state.LengthSeconds)</span>
+        <span class="readout">@Format(CurrentSeconds) / @Format(_state.LengthSeconds)</span>
 
         <label for="bpm">BPM</label>
         <input id="bpm" type="number" min="20" max="300" @bind="_state.Bpm" />
@@ -24,6 +28,12 @@
                 <option value="@option.Subdivisions">@option.Label</option>
             }
         </select>
+
+        <button class="btn" @onclick="SaveAsync">Save</button>
+        <label class="btn">
+            Load
+            <InputFile OnChange="LoadAsync" accept=".json" style="display:none" />
+        </label>
 
         <span class="spacer"></span>
 
@@ -43,6 +53,11 @@
         </div>
     </div>
 
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <div class="compose-error">@_error</div>
+    }
+
     <div class="editor-main">
         <aside class="sidebar">
             <h2>Instruments</h2>
@@ -51,12 +66,14 @@
                 {
                     var color = InstrumentPalette.For(instrument);
                     var selected = _state.SelectedInstrument == instrument;
+                    var noteCount = _state.WorkingSong.Tracks
+                        .First(t => t.Instrument == instrument).Notes.Count;
                     <li class="instrument-item @(selected ? "selected" : "")"
                         style="color:@color"
                         @onclick="() => SelectInstrument(instrument)">
                         <span class="instrument-dot"></span>
                         <span class="instrument-name">@instrument</span>
-                        <span class="instrument-mute" title="Mute / solo (coming soon)">M</span>
+                        <span class="instrument-mute">@noteCount</span>
                     </li>
                 }
             </ul>
@@ -67,23 +84,254 @@
                    LengthBeats="_state.LengthBeats"
                    TimeZoom="_state.TimeZoom"
                    PitchZoom="_state.PitchZoom"
-                   OnZoomChanged="ApplyZoomChange" />
+                   PlayheadBeat="_state.CurrentBeat"
+                   Revision="_revision"
+                   Debug="DebugOverlay"
+                   Notes="AllNotes()"
+                   OnZoomChanged="ApplyZoomChange"
+                   OnNotePlaced="PlaceNote"
+                   OnNoteMoved="MoveNote"
+                   OnNoteDeleted="DeleteNote" />
     </div>
 </div>
 
 @code {
     private readonly ComposeState _state = new();
-    private bool _isPlaying;
+    private AudioInterop _audio = default!;
+    private DownloadInterop _downloader = default!;
+    private SongPlayer? _player;
+    private System.Timers.Timer? _playTimer;
+    private int _revision;
+    private string _error = "";
 
-    private void Play() => _isPlaying = true;
+    // Coordinate debug overlay: set true to draw a crosshair + target cell.
+    private bool DebugOverlay { get; set; }
 
-    private void Stop()
+    private double CurrentSeconds => TimingService.BeatsToSeconds(_state.CurrentBeat, _state.Bpm);
+
+    protected override void OnInitialized()
     {
-        _isPlaying = false;
-        _state.CurrentTimeSec = 0;
+        _audio = new AudioInterop(JS, Navigation);
+        _downloader = new DownloadInterop(JS, Navigation);
+        _playTimer = new System.Timers.Timer(33) { AutoReset = true };
+        _playTimer.Elapsed += async (_, _) => await PollAsync();
     }
 
     private void SelectInstrument(string instrument) => _state.SelectedInstrument = instrument;
+
+    /// <summary>
+    /// Builds the render list for the piano roll. Every track is treated identically:
+    /// notes are placed on their real pitch row, and only the color and the selected
+    /// flag differ. Unselected tracks render as ghosts. There is no instrument-type
+    /// branching anywhere in this path.
+    /// </summary>
+    private IReadOnlyList<PianoRollNote> AllNotes()
+    {
+        var result = new List<PianoRollNote>();
+
+        foreach (var track in _state.WorkingSong.Tracks)
+        {
+            var color = InstrumentPalette.For(track.Instrument);
+            var selected = track.Instrument == _state.SelectedInstrument;
+
+            for (var i = 0; i < track.Notes.Count; i++)
+            {
+                var note = track.Notes[i];
+                var midi = NormalizeMidi(PitchMath.TryNameToMidi(note.Pitch, out var m) ? m : 60);
+                result.Add(new PianoRollNote(note.Beat, midi, note.Duration, color, selected, i));
+            }
+        }
+
+        return result;
+    }
+
+    private void PlaceNote(NotePlacement placement)
+    {
+        var track = _state.CurrentTrack;
+
+        // Only an exact duplicate on this track is rejected. Different pitches at the
+        // same beat (chords) and the same pitch on a different track are both allowed.
+        if (HasExactDuplicate(track, ignoreIndex: -1, placement.Beat, placement.Midi))
+        {
+            return;
+        }
+
+        track.Notes.Add(new Note
+        {
+            Beat = placement.Beat,
+            Pitch = PitchMath.MidiToName(placement.Midi),
+            Velocity = 0.8,
+            Duration = _state.SnapBeats,
+        });
+        _revision++;
+    }
+
+    private void MoveNote(NoteMove move)
+    {
+        var track = _state.CurrentTrack;
+        if (move.Index < 0 || move.Index >= track.Notes.Count)
+        {
+            return;
+        }
+
+        // Refuse to move onto an exact duplicate; a different pitch at the same beat
+        // (chord) is fine, so the note can be stacked.
+        if (HasExactDuplicate(track, move.Index, move.Beat, move.Midi))
+        {
+            return;
+        }
+
+        var note = track.Notes[move.Index];
+        track.Notes[move.Index] = note with
+        {
+            Beat = move.Beat,
+            Pitch = PitchMath.MidiToName(move.Midi),
+        };
+        _revision++;
+    }
+
+    /// <summary>Clamps a MIDI value into the piano roll's shared visible range.</summary>
+    private static int NormalizeMidi(int midi) =>
+        Math.Clamp(midi, InstrumentLayout.PitchMinMidi, InstrumentLayout.PitchMaxMidi);
+
+    /// <summary>
+    /// True only if another note on this track sits at the exact same (Beat, Pitch).
+    /// Same beat + different pitch (a chord) is NOT a duplicate and is allowed.
+    /// </summary>
+    private static bool HasExactDuplicate(Track track, int ignoreIndex, double beat, int midi)
+    {
+        for (var i = 0; i < track.Notes.Count; i++)
+        {
+            if (i == ignoreIndex)
+            {
+                continue;
+            }
+            var note = track.Notes[i];
+            var noteMidi = NormalizeMidi(PitchMath.TryNameToMidi(note.Pitch, out var m) ? m : 60);
+            if (Math.Abs(note.Beat - beat) < 1e-6 && noteMidi == midi)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void DeleteNote(int index)
+    {
+        var track = _state.CurrentTrack;
+        if (index < 0 || index >= track.Notes.Count)
+        {
+            return;
+        }
+
+        track.Notes.RemoveAt(index);
+        _revision++;
+    }
+
+    private async Task PlayAsync()
+    {
+        _error = "";
+        await _audio.InitAsync();
+        _player = new SongPlayer(_audio, _state.WorkingSong);
+        await _player.StartAsync();
+        _state.IsPlaying = true;
+        _playTimer!.Start();
+    }
+
+    private async Task PauseAsync()
+    {
+        _playTimer!.Stop();
+        if (_player is not null)
+        {
+            await _player.PauseAsync();
+        }
+        _state.IsPlaying = false;
+    }
+
+    private async Task StopAsync()
+    {
+        _playTimer!.Stop();
+        if (_player is not null)
+        {
+            await _player.StopAsync();
+        }
+        else
+        {
+            await _audio.ClearScheduledAsync();
+            await _audio.StopTransportAsync();
+        }
+
+        await _audio.SeekTransportAsync(0);
+        _state.CurrentBeat = 0;
+        _state.IsPlaying = false;
+    }
+
+    private async Task PollAsync()
+    {
+        try
+        {
+            await InvokeAsync(async () =>
+            {
+                if (!_state.IsPlaying)
+                {
+                    return;
+                }
+                var seconds = await _audio.GetTransportTimeSecAsync();
+                _state.CurrentBeat = TimingService.SecondsToBeats(seconds, _state.Bpm);
+                StateHasChanged();
+            });
+        }
+        catch (JSException)
+        {
+            // Audio module not ready; ignore until next tick.
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        try
+        {
+            var json = await SongSerializer.ToJsonStringAsync(_state.WorkingSong);
+            await _downloader.DownloadTextAsync($"{SafeTitle()}.riff.json", json);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task LoadAsync(InputFileChangeEventArgs e)
+    {
+        _error = "";
+        try
+        {
+            await using var stream = e.File.OpenReadStream(maxAllowedSize: 16 * 1024 * 1024);
+            var song = await SongSerializer.LoadAsync(stream);
+
+            if (_state.IsPlaying || _player is not null)
+            {
+                await StopAsync();
+            }
+
+            _state.LoadSong(song);
+            _revision++;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private string SafeTitle()
+    {
+        var title = _state.WorkingSong.Title;
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            return "song";
+        }
+        var cleaned = new string(title.Select(c => char.IsLetterOrDigit(c) ? c : '-').ToArray()).Trim('-');
+        return cleaned.Length == 0 ? "song" : cleaned;
+    }
 
     private void AdjustTimeZoom(int direction) =>
         _state.TimeZoom = ZoomLevels.StepBy(_state.TimeZoom, direction);
@@ -101,5 +349,12 @@
     {
         var total = (int)Math.Max(0, seconds);
         return $"{total / 60:00}:{total % 60:00}";
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _playTimer?.Dispose();
+        await _audio.DisposeAsync();
+        await _downloader.DisposeAsync();
     }
 }

@@ -1,11 +1,22 @@
-// Piano-roll grid renderer for the Compose page.
-// Draws only the visible viewport of a large virtual canvas: a sticky <canvas>
-// sized to the scroll container, with drawing offset by scrollLeft/scrollTop.
-// A pinned top ruler and left key column stay fixed; the grid scrolls under them.
-// Non-interactive (no note editing). Config comes from Interop/PianoRollInterop.cs.
+// Piano-roll renderer + editor input for the Compose page.
+//
+// DOM layout (see PianoRoll.razor / app.css):
+//   .piano-roll  (CSS grid: [key column | grid] x [ruler | grid])
+//     .piano-roll-corner   .piano-roll-ruler  > canvas   (static viewport)
+//     .piano-roll-keys     > canvas           (static viewport)
+//     .piano-roll-scroll   (the only scroller) > .piano-roll-content > canvas (sticky)
+//
+// The GRID canvas contains ONLY the grid: its top-left pixel is cell (beat 0,
+// top pitch). There is no key/ruler offset to subtract. The ruler and keys are
+// separate viewport-sized canvases that redraw with the grid's scroll offset.
+//
+// COORDINATE CONVENTION: the renderer draws in CSS pixels (the 2D context is
+// scaled by devicePixelRatio for crispness). eventToCanvasPixels() therefore
+// returns CSS pixels too (it divides out devicePixelRatio), so event math and
+// draw math share one unit.
 
-const KEY_STRIP_WIDTH = 52;
-const RULER_HEIGHT = 22;
+const KEY_STRIP_WIDTH = 52; // must match --key-strip-width in app.css
+const RULER_HEIGHT = 22; // must match --ruler-height in app.css
 
 let active = null;
 
@@ -15,17 +26,25 @@ function read(node, fallback) {
 
 function normalize(raw) {
   return {
-    isDrum: read(raw.isDrum ?? raw.IsDrum, false),
     pitchMin: read(raw.pitchMin ?? raw.PitchMin, 48),
     pitchMax: read(raw.pitchMax ?? raw.PitchMax, 84),
     lengthBeats: read(raw.lengthBeats ?? raw.LengthBeats, 60),
     beatsPerBar: read(raw.beatsPerBar ?? raw.BeatsPerBar, 4),
     subdivisionsPerBeat: read(raw.subdivisionsPerBeat ?? raw.SubdivisionsPerBeat, 4),
-    accentColor: read(raw.accentColor ?? raw.AccentColor, "#00d9ff"),
     timeZoom: read(raw.timeZoom ?? raw.TimeZoom, 1),
     pitchZoom: read(raw.pitchZoom ?? raw.PitchZoom, 1),
     basePixelsPerBeat: read(raw.basePixelsPerBeat ?? raw.BasePixelsPerBeat, 288),
     basePixelsPerSemitone: read(raw.basePixelsPerSemitone ?? raw.BasePixelsPerSemitone, 42),
+    playheadBeat: read(raw.playheadBeat ?? raw.PlayheadBeat, 0),
+    debug: read(raw.debug ?? raw.Debug, false),
+    notes: (raw.notes ?? raw.Notes ?? []).map((n) => ({
+      beat: read(n.beat ?? n.Beat, 0),
+      midi: read(n.midi ?? n.Midi, 60),
+      duration: read(n.duration ?? n.Duration, 1),
+      color: read(n.color ?? n.Color, "#00d9ff"),
+      selected: read(n.selected ?? n.Selected, false),
+      index: read(n.index ?? n.Index, -1),
+    })),
   };
 }
 
@@ -42,6 +61,7 @@ function readColors() {
     border: cssVar("--border", "#22222f"),
     borderBright: cssVar("--border-bright", "#33334a"),
     textDim: cssVar("--text-dim", "#8888a0"),
+    accent: cssVar("--accent", "#00d9ff"),
   };
 }
 
@@ -51,177 +71,165 @@ function noteName(midi) {
   return NOTE_NAMES[((midi % 12) + 12) % 12] + (Math.floor(midi / 12) - 1);
 }
 
+// Shared spacing values. The renderer and the hit-tester both use these.
+function metrics() {
+  const config = active.config;
+  return {
+    pixelsPerBeat: config.basePixelsPerBeat * config.timeZoom,
+    pixelsPerSemitone: config.basePixelsPerSemitone * config.pitchZoom,
+  };
+}
+
+function snapBeats() {
+  return 1 / active.config.subdivisionsPerBeat;
+}
+
 function computeLayout() {
   const { scroller, config } = active;
   const vw = scroller.clientWidth;
   const vh = scroller.clientHeight;
-  const gridX = config.isDrum ? 0 : KEY_STRIP_WIDTH;
-  const gridTop = RULER_HEIGHT;
   const rows = config.pitchMax - config.pitchMin + 1;
-  const rowHeight = config.basePixelsPerSemitone * config.pitchZoom;
-  const stepWidth = (config.basePixelsPerBeat * config.timeZoom) / config.subdivisionsPerBeat;
+  const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+  const stepWidth = pixelsPerBeat / config.subdivisionsPerBeat;
   const totalSteps = Math.max(1, Math.round(config.lengthBeats * config.subdivisionsPerBeat));
   const gridW = totalSteps * stepWidth;
-  return { vw, vh, gridX, gridTop, rows, rowHeight, stepWidth, totalSteps, gridW };
+  const gridH = rows * pixelsPerSemitone;
+  return {
+    vw, vh, rows, stepWidth, totalSteps, gridW, gridH,
+    rowHeight: pixelsPerSemitone, pixelsPerBeat,
+  };
+}
+
+// --- canonical coordinate helpers -------------------------------------------
+
+/**
+ * MouseEvent -> canvas CSS-pixel coordinates.
+ * Divides out devicePixelRatio so the result is in the same units the renderer
+ * draws in (see coordinate convention note at top of file).
+ */
+function eventToCanvasPixels(canvas, event) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = rect.width === 0 ? 1 : canvas.width / rect.width;
+  const scaleY = rect.height === 0 ? 1 : canvas.height / rect.height;
+  const points = event.touches ? event.touches[0] : event;
+  return {
+    x: ((points.clientX - rect.left) * scaleX) / (window.devicePixelRatio || 1),
+    y: ((points.clientY - rect.top) * scaleY) / (window.devicePixelRatio || 1),
+  };
+}
+
+/** Snaps a raw beat to the grid cell start, clamped to the song length. */
+function pixelsToCell(x, y, pixelsPerBeat, pixelsPerSemitone, snap) {
+  const rawBeat = x / pixelsPerBeat;
+  const maxBeat = Math.max(0, active.config.lengthBeats - snap);
+  const snappedBeat = Math.max(0, Math.min(maxBeat, Math.floor(rawBeat / snap) * snap));
+  const semitoneIndex = Math.floor(y / pixelsPerSemitone);
+  return { beat: snappedBeat, semitoneIndex, rawBeat };
+}
+
+function rawSemitoneAt(y, pixelsPerSemitone) {
+  return y / pixelsPerSemitone;
+}
+
+function cellToPixels(beat, semitoneIndex, pixelsPerBeat, pixelsPerSemitone) {
+  return { x: beat * pixelsPerBeat, y: semitoneIndex * pixelsPerSemitone };
+}
+
+function midiForSemitone(semitoneIndex) {
+  return active.config.pitchMax - semitoneIndex;
+}
+
+function clampMidi(midi) {
+  const config = active.config;
+  return Math.max(config.pitchMin, Math.min(config.pitchMax, midi));
+}
+
+// --- canvas sizing -----------------------------------------------------------
+
+function resizeCanvas(canvas, cssW, cssH) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.floor(cssW));
+  const h = Math.max(1, Math.floor(cssH));
+  canvas.style.width = w + "px";
+  canvas.style.height = h + "px";
+  const bw = Math.max(1, Math.floor(w * dpr));
+  const bh = Math.max(1, Math.floor(h * dpr));
+  if (canvas.width !== bw) {
+    canvas.width = bw;
+  }
+  if (canvas.height !== bh) {
+    canvas.height = bh;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return ctx;
 }
 
 function applySizes() {
-  const { canvas, content, config } = active;
   const L = computeLayout();
-
-  const contentW = Math.max(L.gridX + L.gridW, L.vw);
-  const contentH = config.isDrum
-    ? L.vh
-    : Math.max(L.gridTop + L.rows * L.rowHeight, L.vh);
+  const contentW = Math.max(L.gridW, L.vw);
+  const contentH = Math.max(L.gridH, L.vh);
 
   if (active.contentW !== contentW) {
-    content.style.width = contentW + "px";
+    active.gridContent.style.width = contentW + "px";
     active.contentW = contentW;
   }
   if (active.contentH !== contentH) {
-    content.style.height = contentH + "px";
+    active.gridContent.style.height = contentH + "px";
     active.contentH = contentH;
   }
 
-  const dpr = window.devicePixelRatio || 1;
-  const backingW = Math.max(1, Math.floor(L.vw * dpr));
-  const backingH = Math.max(1, Math.floor(L.vh * dpr));
+  active.gridCtx = resizeCanvas(active.gridCanvas, L.vw, L.vh);
+  active.rulerCtx = resizeCanvas(active.rulerCanvas, active.rulerHost.clientWidth, active.rulerHost.clientHeight);
+  active.keysCtx = resizeCanvas(active.keysCanvas, active.keysHost.clientWidth, active.keysHost.clientHeight);
 
-  if (canvas.width !== backingW) {
-    canvas.style.width = L.vw + "px";
-    canvas.width = backingW;
-  }
-  if (canvas.height !== backingH) {
-    canvas.style.height = L.vh + "px";
-    canvas.height = backingH;
-  }
-
-  return { L, dpr };
+  return L;
 }
 
-function drawKeyStrip(ctx, firstRow, lastRow, scrollTop, L, colors) {
-  const top = L.gridTop;
-  ctx.fillStyle = colors.panel;
-  ctx.fillRect(0, top, KEY_STRIP_WIDTH, L.vh - top);
+// --- drawing -----------------------------------------------------------------
 
-  ctx.font = "10px 'JetBrains Mono', monospace";
-  ctx.textBaseline = "middle";
-
-  for (let r = firstRow; r <= lastRow; r++) {
-    const pitch = active.config.pitchMax - r;
-    const y = top + r * L.rowHeight - scrollTop;
-    const isC = ((pitch % 12) + 12) % 12 === 0;
-
-    ctx.fillStyle = isC ? colors.panel2 : colors.bg;
-    ctx.fillRect(0, y, KEY_STRIP_WIDTH - 1, Math.max(1, L.rowHeight - 1));
-
-    if (isC || L.rowHeight >= 16) {
-      ctx.fillStyle = isC ? colors.borderBright : colors.textDim;
-      ctx.fillText(noteName(pitch), 4, y + L.rowHeight / 2);
-    }
+function roundRect(ctx, x, y, w, h, r) {
+  if (typeof ctx.roundRect === "function") {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+  } else {
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
   }
-
-  ctx.strokeStyle = colors.borderBright;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(KEY_STRIP_WIDTH - 0.5, top);
-  ctx.lineTo(KEY_STRIP_WIDTH - 0.5, L.vh);
-  ctx.stroke();
 }
 
-function drawRuler(ctx, L, scrollLeft, colors) {
-  ctx.fillStyle = colors.panel;
-  ctx.fillRect(0, 0, L.vw, RULER_HEIGHT);
-
-  const stepsPerBeat = active.config.subdivisionsPerBeat;
-  const stepsPerBar = stepsPerBeat * active.config.beatsPerBar;
-
-  ctx.font = "10px 'JetBrains Mono', monospace";
-  ctx.textBaseline = "middle";
-
-  const firstStep = Math.max(0, Math.floor((scrollLeft - L.gridX) / L.stepWidth));
-  const lastStep = Math.min(L.totalSteps, Math.ceil((scrollLeft + L.vw - L.gridX) / L.stepWidth));
-  const clipX = L.gridX;
-
-  for (let i = firstStep; i <= lastStep; i++) {
-    const x = L.gridX + i * L.stepWidth - scrollLeft;
-    if (x < clipX) {
-      continue;
-    }
-    const isBar = i % stepsPerBar === 0;
-    const isBeat = i % stepsPerBeat === 0;
-
-    if (isBar) {
-      ctx.fillStyle = active.config.accentColor;
-      ctx.fillRect(Math.round(x), 2, 1, RULER_HEIGHT - 4);
-      ctx.fillText(String(i / stepsPerBar + 1), Math.round(x) + 4, RULER_HEIGHT / 2);
-    } else if (isBeat) {
-      ctx.fillStyle = colors.borderBright;
-      ctx.fillRect(Math.round(x), RULER_HEIGHT - 7, 1, 5);
-    }
-  }
-
-  // Corner above the key column, then the ruler's bottom border.
-  ctx.fillStyle = colors.panel2;
-  ctx.fillRect(0, 0, clipX, RULER_HEIGHT);
-
-  ctx.strokeStyle = colors.borderBright;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(0, RULER_HEIGHT - 0.5);
-  ctx.lineTo(L.vw, RULER_HEIGHT - 0.5);
-  ctx.stroke();
-}
-
-function render() {
-  if (!active) {
-    return;
-  }
-  const { canvas, scroller, config, colors } = active;
-  const { L, dpr } = applySizes();
-
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+function drawGrid(L, scrollLeft, scrollTop, colors) {
+  const ctx = active.gridCtx;
+  const config = active.config;
   ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, L.vw, L.vh);
 
-  const scrollLeft = scroller.scrollLeft;
-  const scrollTop = scroller.scrollTop;
-
-  // Visible pitch rows (melodic only).
-  let firstRow = 0;
-  let lastRow = 0;
-  if (!config.isDrum) {
-    firstRow = Math.max(0, Math.floor((scrollTop - L.gridTop) / L.rowHeight));
-    lastRow = Math.min(L.rows - 1, Math.floor((scrollTop + L.vh) / L.rowHeight));
-
-    for (let r = firstRow; r <= lastRow; r++) {
-      const pitch = config.pitchMax - r;
-      const y = Math.round(L.gridTop + r * L.rowHeight - scrollTop) + 0.5;
-      const isC = ((pitch % 12) + 12) % 12 === 0;
-      ctx.strokeStyle = isC ? colors.borderBright : colors.border;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(L.gridX, y);
-      ctx.lineTo(L.vw, y);
-      ctx.stroke();
-    }
+  const firstRow = Math.max(0, Math.floor(scrollTop / L.rowHeight));
+  const lastRow = Math.min(L.rows - 1, Math.floor((scrollTop + L.vh) / L.rowHeight));
+  for (let r = firstRow; r <= lastRow; r++) {
+    const pitch = config.pitchMax - r;
+    const y = Math.round(r * L.rowHeight - scrollTop) + 0.5;
+    const isC = ((pitch % 12) + 12) % 12 === 0;
+    ctx.strokeStyle = isC ? colors.borderBright : colors.border;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(L.vw, y);
+    ctx.stroke();
   }
 
-  // Visible time steps.
   const stepsPerBeat = config.subdivisionsPerBeat;
   const stepsPerBar = stepsPerBeat * config.beatsPerBar;
-  const firstStep = Math.max(0, Math.floor((scrollLeft - L.gridX) / L.stepWidth));
-  const lastStep = Math.min(L.totalSteps, Math.ceil((scrollLeft + L.vw - L.gridX) / L.stepWidth));
+  const firstStep = Math.max(0, Math.floor(scrollLeft / L.stepWidth));
+  const lastStep = Math.min(L.totalSteps, Math.ceil((scrollLeft + L.vw) / L.stepWidth));
 
   for (let i = firstStep; i <= lastStep; i++) {
-    const x = Math.round(L.gridX + i * L.stepWidth - scrollLeft) + 0.5;
+    const x = Math.round(i * L.stepWidth - scrollLeft) + 0.5;
     const isBar = i % stepsPerBar === 0;
     const isBeat = i % stepsPerBeat === 0;
-
     if (isBar) {
       ctx.globalAlpha = 0.5;
-      ctx.strokeStyle = config.accentColor;
+      ctx.strokeStyle = colors.accent;
       ctx.lineWidth = 1.5;
     } else if (isBeat) {
       ctx.globalAlpha = 1;
@@ -232,25 +240,197 @@ function render() {
       ctx.strokeStyle = colors.border;
       ctx.lineWidth = 1;
     }
-
     ctx.beginPath();
-    ctx.moveTo(x, L.gridTop);
+    ctx.moveTo(x, 0);
     ctx.lineTo(x, L.vh);
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
 
-  if (!config.isDrum) {
-    drawKeyStrip(ctx, firstRow, lastRow, scrollTop, L, colors);
-  } else {
-    ctx.fillStyle = colors.textDim;
-    ctx.font = "11px 'JetBrains Mono', monospace";
-    ctx.textBaseline = "top";
-    ctx.fillText("percussion", 8, RULER_HEIGHT + 8);
+  drawNotes(L, scrollLeft, scrollTop);
+  drawPlayhead(L, scrollLeft, colors);
+  drawDebug(L, scrollLeft, scrollTop, colors);
+}
+
+function noteRect(note, L, scrollLeft, scrollTop) {
+  const x = note.beat * L.pixelsPerBeat - scrollLeft;
+  const w = Math.max(4, note.duration * L.pixelsPerBeat);
+  const y = (active.config.pitchMax - note.midi) * L.rowHeight - scrollTop;
+  return { x, y, w, h: L.rowHeight };
+}
+
+function drawNotes(L, scrollLeft, scrollTop) {
+  const ctx = active.gridCtx;
+  const config = active.config;
+  const playhead = config.playheadBeat;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, L.vw, L.vh);
+  ctx.clip();
+
+  for (const note of config.notes) {
+    const rect = noteRect(note, L, scrollLeft, scrollTop);
+    if (rect.x > L.vw || rect.x + rect.w < 0 || rect.y + rect.h < 0 || rect.y > L.vh) {
+      continue;
+    }
+
+    const isActive =
+      note.selected && playhead !== null && playhead >= note.beat && playhead < note.beat + note.duration;
+
+    if (note.selected) {
+      ctx.globalAlpha = isActive ? 1.0 : 0.85;
+      ctx.shadowColor = note.color;
+      ctx.shadowBlur = isActive ? 16 : 8;
+    } else {
+      ctx.globalAlpha = 0.2;
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = "transparent";
+    }
+
+    ctx.fillStyle = note.color;
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 3);
+    ctx.fill();
   }
 
-  drawRuler(ctx, L, scrollLeft, colors);
+  ctx.restore();
 }
+
+function drawPlayhead(L, scrollLeft, colors) {
+  const x = active.config.playheadBeat * L.pixelsPerBeat - scrollLeft;
+  if (x < 0 || x > L.vw) {
+    return;
+  }
+  const ctx = active.gridCtx;
+  ctx.globalAlpha = 0.9;
+  ctx.strokeStyle = colors.accent;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x, 0);
+  ctx.lineTo(x, L.vh);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+function drawRuler(L, scrollLeft, colors) {
+  const ctx = active.rulerCtx;
+  const w = active.rulerHost.clientWidth;
+  const h = active.rulerHost.clientHeight;
+  ctx.fillStyle = colors.panel;
+  ctx.fillRect(0, 0, w, h);
+
+  const stepsPerBeat = active.config.subdivisionsPerBeat;
+  const stepsPerBar = stepsPerBeat * active.config.beatsPerBar;
+  const firstStep = Math.max(0, Math.floor(scrollLeft / L.stepWidth));
+  const lastStep = Math.min(L.totalSteps, Math.ceil((scrollLeft + w) / L.stepWidth));
+
+  ctx.font = "10px 'JetBrains Mono', monospace";
+  ctx.textBaseline = "middle";
+
+  for (let i = firstStep; i <= lastStep; i++) {
+    const x = i * L.stepWidth - scrollLeft;
+    const isBar = i % stepsPerBar === 0;
+    const isBeat = i % stepsPerBeat === 0;
+    if (isBar) {
+      ctx.fillStyle = colors.accent;
+      ctx.fillRect(Math.round(x), 2, 1, h - 4);
+      ctx.fillText(String(i / stepsPerBar + 1), Math.round(x) + 4, h / 2);
+    } else if (isBeat) {
+      ctx.fillStyle = colors.borderBright;
+      ctx.fillRect(Math.round(x), h - 7, 1, 5);
+    }
+  }
+
+  ctx.strokeStyle = colors.borderBright;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, h - 0.5);
+  ctx.lineTo(w, h - 0.5);
+  ctx.stroke();
+}
+
+function drawKeys(L, scrollTop, colors) {
+  const ctx = active.keysCtx;
+  const w = active.keysHost.clientWidth;
+  const h = active.keysHost.clientHeight;
+  if (w === 0 || h === 0) {
+    return;
+  }
+  ctx.fillStyle = colors.panel;
+  ctx.fillRect(0, 0, w, h);
+
+  const firstRow = Math.max(0, Math.floor(scrollTop / L.rowHeight));
+  const lastRow = Math.min(L.rows - 1, Math.floor((scrollTop + h) / L.rowHeight));
+
+  ctx.font = "10px 'JetBrains Mono', monospace";
+  ctx.textBaseline = "middle";
+
+  for (let r = firstRow; r <= lastRow; r++) {
+    const pitch = active.config.pitchMax - r;
+    const y = r * L.rowHeight - scrollTop;
+    const isC = ((pitch % 12) + 12) % 12 === 0;
+    ctx.fillStyle = isC ? colors.panel2 : colors.bg;
+    ctx.fillRect(0, y, w - 1, Math.max(1, L.rowHeight - 1));
+    if (isC || L.rowHeight >= 16) {
+      ctx.fillStyle = isC ? colors.borderBright : colors.textDim;
+      ctx.fillText(noteName(pitch), 4, y + L.rowHeight / 2);
+    }
+  }
+
+  ctx.strokeStyle = colors.borderBright;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(w - 0.5, 0);
+  ctx.lineTo(w - 0.5, h);
+  ctx.stroke();
+}
+
+function drawDebug(L, scrollLeft, scrollTop, colors) {
+  const config = active.config;
+  if (!config.debug || !active.lastPointer) {
+    return;
+  }
+  const ctx = active.gridCtx;
+  const { x, y } = active.lastPointer;
+  const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+  const snap = snapBeats();
+
+  const cell = pixelsToCell(x + scrollLeft, y + scrollTop, pixelsPerBeat, pixelsPerSemitone, snap);
+  const rect = cellToPixels(cell.beat, cell.semitoneIndex, pixelsPerBeat, pixelsPerSemitone);
+
+  ctx.save();
+  ctx.strokeStyle = "#ff2e63";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(
+    Math.round(rect.x - scrollLeft) + 0.5,
+    Math.round(rect.y - scrollTop) + 0.5,
+    Math.round(snap * pixelsPerBeat),
+    Math.round(pixelsPerSemitone),
+  );
+  ctx.beginPath();
+  ctx.moveTo(x - 10, y);
+  ctx.lineTo(x + 10, y);
+  ctx.moveTo(x, y - 10);
+  ctx.lineTo(x, y + 10);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function render() {
+  if (!active) {
+    return;
+  }
+  const L = applySizes();
+  const colors = active.colors;
+  const scrollLeft = active.scroller.scrollLeft;
+  const scrollTop = active.scroller.scrollTop;
+
+  drawGrid(L, scrollLeft, scrollTop, colors);
+  drawRuler(L, scrollLeft, colors);
+  drawKeys(L, scrollTop, colors);
+}
+
+// --- interaction -------------------------------------------------------------
 
 function invoke(method, ...args) {
   if (!active || !active.dotNet) {
@@ -273,6 +453,115 @@ function schedule() {
   });
 }
 
+function insideGrid(x, y, L) {
+  return x >= 0 && y >= 0 && x <= L.vw && y <= L.vh;
+}
+
+// Only selected-track notes are interactive; ghosts are ignored.
+function hitTest(x, y, L, scrollLeft, scrollTop) {
+  const notes = active.config.notes;
+  for (let i = notes.length - 1; i >= 0; i--) {
+    const note = notes[i];
+    if (!note.selected) {
+      continue;
+    }
+    const rect = noteRect(note, L, scrollLeft, scrollTop);
+    if (x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) {
+      return note.index;
+    }
+  }
+  return -1;
+}
+
+function onPointerDown(event) {
+  if (!active) {
+    return;
+  }
+  const canvas = active.gridCanvas;
+  const { x, y } = eventToCanvasPixels(canvas, event);
+  active.lastPointer = { x, y };
+  const L = computeLayout();
+  const scrollLeft = active.scroller.scrollLeft;
+  const scrollTop = active.scroller.scrollTop;
+
+  if (event.button === 2) {
+    const index = hitTest(x, y, L, scrollLeft, scrollTop);
+    if (index >= 0) {
+      event.preventDefault();
+      invoke("OnDeleteNote", index);
+    }
+    return;
+  }
+
+  if (event.button !== 0) {
+    return;
+  }
+  event.preventDefault();
+
+  const index = hitTest(x, y, L, scrollLeft, scrollTop);
+  if (index >= 0) {
+    const note = active.config.notes.find((n) => n.selected && n.index === index);
+    const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+    active.drag = {
+      index,
+      pointerId: event.pointerId,
+      offsetBeats: (x + scrollLeft) / pixelsPerBeat - note.beat,
+      offsetRows: (y + scrollTop) / pixelsPerSemitone - (active.config.pitchMax - note.midi),
+    };
+    canvas.setPointerCapture(event.pointerId);
+    canvas.style.cursor = "move";
+    return;
+  }
+
+  if (insideGrid(x, y, L)) {
+    const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+    const cell = pixelsToCell(x + scrollLeft, y + scrollTop, pixelsPerBeat, pixelsPerSemitone, snapBeats());
+    invoke("OnPlaceNote", cell.beat, clampMidi(midiForSemitone(cell.semitoneIndex)));
+  }
+}
+
+function onPointerMove(event) {
+  if (!active) {
+    return;
+  }
+  const canvas = active.gridCanvas;
+  const { x, y } = eventToCanvasPixels(canvas, event);
+  active.lastPointer = { x, y };
+  const L = computeLayout();
+  const scrollLeft = active.scroller.scrollLeft;
+  const scrollTop = active.scroller.scrollTop;
+
+  if (active.drag && event.pointerId === active.drag.pointerId) {
+    const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+    const snap = snapBeats();
+    const rawBeat = (x + scrollLeft) / pixelsPerBeat - active.drag.offsetBeats;
+    const maxBeat = Math.max(0, active.config.lengthBeats - snap);
+    const beat = Math.max(0, Math.min(maxBeat, Math.floor(rawBeat / snap) * snap));
+    const rawRow = (y + scrollTop) / pixelsPerSemitone - active.drag.offsetRows;
+    const midi = clampMidi(midiForSemitone(Math.round(rawRow)));
+    invoke("OnMoveNote", active.drag.index, beat, midi);
+    schedule();
+    return;
+  }
+
+  const index = hitTest(x, y, L, scrollLeft, scrollTop);
+  canvas.style.cursor = index >= 0 ? "move" : "crosshair";
+  if (active.config.debug) {
+    schedule();
+  }
+}
+
+function onPointerUp(event) {
+  if (!active || !active.drag || event.pointerId !== active.drag.pointerId) {
+    return;
+  }
+  if (active.gridCanvas.hasPointerCapture && active.gridCanvas.hasPointerCapture(event.pointerId)) {
+    active.gridCanvas.releasePointerCapture(event.pointerId);
+  }
+  active.drag = null;
+  active.gridCanvas.style.cursor = "crosshair";
+}
+
 function teardown() {
   if (active && active.cleanup) {
     active.cleanup();
@@ -281,24 +570,39 @@ function teardown() {
 }
 
 /**
- * Binds a canvas (expected at scroller > content > canvas) and starts rendering.
- * Wheel/keyboard zoom changes are routed back to C# via the supplied DotNet reference.
+ * Binds the .piano-roll root (finding its grid/ruler/keys canvases) and starts
+ * rendering. Zoom and note-edit events route back to C# via the DotNet reference.
  */
-export function init(canvas, rawConfig, dotNet) {
+export function init(root, rawConfig, dotNet) {
   teardown();
 
-  const content = canvas.parentElement;
-  const scroller = content.parentElement;
+  const scroller = root.querySelector(".piano-roll-scroll");
+  const gridContent = scroller.querySelector(".piano-roll-content");
+  const gridCanvas = scroller.querySelector("canvas");
+  const rulerHost = root.querySelector(".piano-roll-ruler");
+  const rulerCanvas = rulerHost.querySelector("canvas");
+  const keysHost = root.querySelector(".piano-roll-keys");
+  const keysCanvas = keysHost.querySelector("canvas");
 
   active = {
-    canvas,
-    content,
+    root,
     scroller,
+    gridContent,
+    gridCanvas,
+    rulerHost,
+    rulerCanvas,
+    keysHost,
+    keysCanvas,
+    gridCtx: null,
+    rulerCtx: null,
+    keysCtx: null,
     config: normalize(rawConfig),
     colors: readColors(),
     dotNet,
     dirty: false,
     raf: 0,
+    drag: null,
+    lastPointer: null,
     cleanup: null,
   };
 
@@ -314,7 +618,7 @@ export function init(canvas, rawConfig, dotNet) {
       axis = "both";
     }
     if (!axis) {
-      return; // Plain wheel keeps normal scrolling.
+      return;
     }
     event.preventDefault();
     invoke("OnZoomStep", axis, event.deltaY < 0 ? 1 : -1);
@@ -347,17 +651,33 @@ export function init(canvas, rawConfig, dotNet) {
     event.preventDefault();
   };
 
-  const observer = new ResizeObserver(() => schedule());
+  const onContextMenu = (event) => event.preventDefault();
+  const onResize = () => schedule();
+
+  const observer = new ResizeObserver(onResize);
+  observer.observe(root);
   observer.observe(scroller);
 
   scroller.addEventListener("scroll", onScroll, { passive: true });
   scroller.addEventListener("wheel", onWheel, { passive: false });
+  gridCanvas.addEventListener("pointerdown", onPointerDown);
+  gridCanvas.addEventListener("pointermove", onPointerMove);
+  gridCanvas.addEventListener("pointerup", onPointerUp);
+  gridCanvas.addEventListener("pointercancel", onPointerUp);
+  gridCanvas.addEventListener("contextmenu", onContextMenu);
   window.addEventListener("keydown", onKey);
+  window.addEventListener("resize", onResize);
 
   active.cleanup = () => {
     scroller.removeEventListener("scroll", onScroll);
     scroller.removeEventListener("wheel", onWheel);
+    gridCanvas.removeEventListener("pointerdown", onPointerDown);
+    gridCanvas.removeEventListener("pointermove", onPointerMove);
+    gridCanvas.removeEventListener("pointerup", onPointerUp);
+    gridCanvas.removeEventListener("pointercancel", onPointerUp);
+    gridCanvas.removeEventListener("contextmenu", onContextMenu);
     window.removeEventListener("keydown", onKey);
+    window.removeEventListener("resize", onResize);
     observer.disconnect();
     if (active && active.raf) {
       cancelAnimationFrame(active.raf);
@@ -373,6 +693,25 @@ export function update(rawConfig) {
   }
   active.config = normalize(rawConfig);
   active.colors = readColors();
+  // Do NOT clear active.drag: C# re-renders on every drag update and the drag
+  // index stays valid because note order is stable while dragging.
+  schedule();
+}
+
+export function setPlayhead(beat) {
+  if (!active) {
+    return;
+  }
+  active.config.playheadBeat = beat;
+  schedule();
+}
+
+/** Toggle the coordinate debug overlay (crosshair + target cell outline). */
+export function setDebugCoordinates(enabled) {
+  if (!active) {
+    return;
+  }
+  active.config.debug = !!enabled;
   schedule();
 }
 

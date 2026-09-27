@@ -5,8 +5,8 @@ using RiffGame.Game;
 namespace RiffGame.Interop;
 
 /// <summary>
-/// C# wrapper around wwwroot/js/pianoroll.js, which renders the editor grid on a canvas.
-/// The module handles its own resize handling after init.
+/// C# wrapper around wwwroot/js/pianoroll.js, which renders and handles input for the
+/// editor grid. The module handles its own resize/scroll handling after init.
 /// </summary>
 public sealed class PianoRollInterop : IAsyncDisposable
 {
@@ -26,14 +26,18 @@ public sealed class PianoRollInterop : IAsyncDisposable
             "import", new Uri(new Uri(_nav.BaseUri), "js/pianoroll.js").ToString());
 
     /// <summary>
-    /// Binds a canvas element (at scroller &gt; content &gt; canvas) and renders the grid.
-    /// Wheel/keyboard zoom events are routed back to <paramref name="dotNet"/>.
+    /// Binds the .piano-roll root element (whose child canvases are found by class)
+    /// and renders the grid. Zoom and note-edit events route back to <paramref name="dotNet"/>.
     /// </summary>
-    public async ValueTask InitAsync(ElementReference canvas, PianoRollConfig config, DotNetObjectReference<PianoRollCallbacks> dotNet)
-        => await (await GetModuleAsync()).InvokeVoidAsync("init", canvas, config, dotNet);
+    public async ValueTask InitAsync(ElementReference root, PianoRollConfig config, DotNetObjectReference<PianoRollCallbacks> dotNet)
+        => await (await GetModuleAsync()).InvokeVoidAsync("init", root, config, dotNet);
 
     public async ValueTask UpdateAsync(PianoRollConfig config)
         => await (await GetModuleAsync()).InvokeVoidAsync("update", config);
+
+    /// <summary>Cheap per-frame update of just the playhead position, without resending notes.</summary>
+    public async ValueTask SetPlayheadAsync(double beat)
+        => await (await GetModuleAsync()).InvokeVoidAsync("setPlayhead", beat);
 
     public async ValueTask DisposeAsync()
     {
