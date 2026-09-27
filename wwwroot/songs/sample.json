@@ -1,0 +1,68 @@
+{
+  "title": "Sample Loop",
+  "bpm": 120,
+  "beatsPerBar": 4,
+  "offsetMs": 0,
+  "tracks": [
+    {
+      "instrument": "kick",
+      "notes": [
+        { "beat": 0, "pitch": "C1", "velocity": 0.95, "duration": 0.25 },
+        { "beat": 2, "pitch": "C1", "velocity": 0.95, "duration": 0.25 },
+        { "beat": 4, "pitch": "C1", "velocity": 0.95, "duration": 0.25 },
+        { "beat": 6, "pitch": "C1", "velocity": 0.95, "duration": 0.25 },
+        { "beat": 8, "pitch": "C1", "velocity": 0.95, "duration": 0.25 },
+        { "beat": 10, "pitch": "C1", "velocity": 0.95, "duration": 0.25 },
+        { "beat": 12, "pitch": "C1", "velocity": 0.95, "duration": 0.25 },
+        { "beat": 14, "pitch": "C1", "velocity": 0.95, "duration": 0.25 }
+      ]
+    },
+    {
+      "instrument": "snare",
+      "notes": [
+        { "beat": 1, "pitch": "C4", "velocity": 0.7, "duration": 0.25 },
+        { "beat": 3, "pitch": "C4", "velocity": 0.7, "duration": 0.25 },
+        { "beat": 5, "pitch": "C4", "velocity": 0.7, "duration": 0.25 },
+        { "beat": 7, "pitch": "C4", "velocity": 0.7, "duration": 0.25 },
+        { "beat": 9, "pitch": "C4", "velocity": 0.7, "duration": 0.25 },
+        { "beat": 11, "pitch": "C4", "velocity": 0.7, "duration": 0.25 },
+        { "beat": 13, "pitch": "C4", "velocity": 0.7, "duration": 0.25 },
+        { "beat": 15, "pitch": "C4", "velocity": 0.7, "duration": 0.25 }
+      ]
+    },
+    {
+      "instrument": "bass",
+      "notes": [
+        { "beat": 0, "pitch": "A2", "velocity": 0.85, "duration": 1.5 },
+        { "beat": 2, "pitch": "A2", "velocity": 0.85, "duration": 1.0 },
+        { "beat": 4, "pitch": "F2", "velocity": 0.85, "duration": 1.5 },
+        { "beat": 6, "pitch": "F2", "velocity": 0.85, "duration": 1.0 },
+        { "beat": 8, "pitch": "C3", "velocity": 0.85, "duration": 1.5 },
+        { "beat": 10, "pitch": "C3", "velocity": 0.85, "duration": 1.0 },
+        { "beat": 12, "pitch": "G2", "velocity": 0.85, "duration": 1.5 },
+        { "beat": 14, "pitch": "G2", "velocity": 0.85, "duration": 1.0 }
+      ]
+    },
+    {
+      "instrument": "piano",
+      "notes": [
+        { "beat": 0, "pitch": "E4", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 1, "pitch": "A4", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 2, "pitch": "C5", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 3, "pitch": "E5", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 4, "pitch": "C5", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 5, "pitch": "A4", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 6, "pitch": "F4", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 7, "pitch": "G4", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 8, "pitch": "E5", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 9, "pitch": "C5", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 10, "pitch": "G4", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 11, "pitch": "E4", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 12, "pitch": "D5", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 13, "pitch": "B4", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 14, "pitch": "G4", "velocity": 0.8, "duration": 0.9 },
+        { "beat": 15, "pitch": "B4", "velocity": 0.8, "duration": 0.9 }
+      ]
+    }
+  ]
+}

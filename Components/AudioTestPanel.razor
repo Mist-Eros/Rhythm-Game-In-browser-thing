@@ -1,7 +1,10 @@
 @using RiffGame.Interop
+@using RiffGame.Songs
+@using RiffGame.Game
 @implements IAsyncDisposable
 @inject IJSRuntime JS
 @inject NavigationManager Navigation
+@inject HttpClient Http
 
 <h2>Audio test</h2>
 
@@ -24,6 +27,14 @@
     <span class="ms-2 font-monospace">Transport: @_transportTime.ToString("F2") s</span>
 </div>
 
+<h2 class="mt-4">Song Player</h2>
+
+<div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+    <button class="btn btn-success" @onclick="LoadAndPlaySampleAsync">Load sample &amp; play</button>
+    <button class="btn btn-danger" @onclick="StopSongAsync">Stop</button>
+    <span class="ms-2">@_songInfo</span>
+</div>
+
 @code {
     private static readonly string[] Instruments =
         ["kick", "snare", "hihat", "bass", "guitar", "piano", "musicbox"];
@@ -36,6 +47,8 @@
     private System.Timers.Timer? _pollTimer;
     private CancellationTokenSource? _metronomeCts;
     private double _transportTime;
+    private SongPlayer? _songPlayer;
+    private string _songInfo = "";
 
     protected override void OnInitialized()
     {
@@ -110,6 +123,35 @@
     {
         await _audio.StopTransportAsync();
         await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task LoadAndPlaySampleAsync()
+    {
+        try
+        {
+            await _audio.InitAsync();
+            var song = await SongSerializer.LoadFromUrlAsync(Http, "songs/sample.json");
+            _songPlayer = new SongPlayer(_audio, song);
+
+            var noteCount = song.Tracks.Sum(track => track.Notes.Count);
+            _songInfo = $"\"{song.Title}\" — {song.Bpm} BPM — {noteCount} notes";
+
+            await _songPlayer.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            _songInfo = $"Error: {ex.Message}";
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task StopSongAsync()
+    {
+        if (_songPlayer is not null)
+        {
+            await _songPlayer.StopAsync();
+        }
     }
 
     public async ValueTask DisposeAsync()
