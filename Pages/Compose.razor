@@ -1,0 +1,105 @@
+@page "/compose"
+@using RiffGame.Components
+@using RiffGame.Game
+@using RiffGame.Songs
+
+<PageTitle>Compose · RiffGame</PageTitle>
+
+<div class="compose">
+    <div class="transport">
+        <button class="btn btn-accent @(_isPlaying ? "active" : "")" @onclick="Play">
+            @(_isPlaying ? "▶ Playing" : "▶ Play")
+        </button>
+        <button class="btn" @onclick="Stop">■ Stop</button>
+
+        <span class="readout">@Format(_state.CurrentTimeSec) / @Format(_state.LengthSeconds)</span>
+
+        <label for="bpm">BPM</label>
+        <input id="bpm" type="number" min="20" max="300" @bind="_state.Bpm" />
+
+        <label for="snap">Snap</label>
+        <select id="snap" @bind="_state.SubdivisionsPerBeat">
+            @foreach (var option in SnapOptions.All)
+            {
+                <option value="@option.Subdivisions">@option.Label</option>
+            }
+        </select>
+
+        <span class="spacer"></span>
+
+        <div class="zoom-controls">
+            <div class="zoom-row">
+                <span class="zoom-label">TIME</span>
+                <button class="btn btn-mini" @onclick="() => AdjustTimeZoom(-1)">−</button>
+                <span class="zoom-value">@_state.TimeZoom.ToString("0.00")x</span>
+                <button class="btn btn-mini" @onclick="() => AdjustTimeZoom(1)">+</button>
+            </div>
+            <div class="zoom-row">
+                <span class="zoom-label">PITCH</span>
+                <button class="btn btn-mini" @onclick="() => AdjustPitchZoom(-1)">−</button>
+                <span class="zoom-value">@_state.PitchZoom.ToString("0.00")x</span>
+                <button class="btn btn-mini" @onclick="() => AdjustPitchZoom(1)">+</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="editor-main">
+        <aside class="sidebar">
+            <h2>Instruments</h2>
+            <ul class="instrument-list">
+                @foreach (var instrument in InstrumentNames.All)
+                {
+                    var color = InstrumentPalette.For(instrument);
+                    var selected = _state.SelectedInstrument == instrument;
+                    <li class="instrument-item @(selected ? "selected" : "")"
+                        style="color:@color"
+                        @onclick="() => SelectInstrument(instrument)">
+                        <span class="instrument-dot"></span>
+                        <span class="instrument-name">@instrument</span>
+                        <span class="instrument-mute" title="Mute / solo (coming soon)">M</span>
+                    </li>
+                }
+            </ul>
+        </aside>
+
+        <PianoRoll Instrument="_state.SelectedInstrument"
+                   SubdivisionsPerBeat="_state.SubdivisionsPerBeat"
+                   LengthBeats="_state.LengthBeats"
+                   TimeZoom="_state.TimeZoom"
+                   PitchZoom="_state.PitchZoom"
+                   OnZoomChanged="ApplyZoomChange" />
+    </div>
+</div>
+
+@code {
+    private readonly ComposeState _state = new();
+    private bool _isPlaying;
+
+    private void Play() => _isPlaying = true;
+
+    private void Stop()
+    {
+        _isPlaying = false;
+        _state.CurrentTimeSec = 0;
+    }
+
+    private void SelectInstrument(string instrument) => _state.SelectedInstrument = instrument;
+
+    private void AdjustTimeZoom(int direction) =>
+        _state.TimeZoom = ZoomLevels.StepBy(_state.TimeZoom, direction);
+
+    private void AdjustPitchZoom(int direction) =>
+        _state.PitchZoom = ZoomLevels.StepBy(_state.PitchZoom, direction);
+
+    private void ApplyZoomChange(ZoomChange change)
+    {
+        _state.TimeZoom = ZoomLevels.Clamp(change.Time);
+        _state.PitchZoom = ZoomLevels.Clamp(change.Pitch);
+    }
+
+    private static string Format(double seconds)
+    {
+        var total = (int)Math.Max(0, seconds);
+        return $"{total / 60:00}:{total % 60:00}";
+    }
+}

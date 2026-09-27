@@ -1,0 +1,99 @@
+@using RiffGame.Game
+@using RiffGame.Interop
+@using RiffGame.Songs
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+@inject NavigationManager Navigation
+
+<div class="piano-roll-scroll">
+    <div class="piano-roll-content">
+        <canvas class="piano-roll-canvas" @ref="_canvas"></canvas>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string Instrument { get; set; } = InstrumentNames.Piano;
+    [Parameter] public int SubdivisionsPerBeat { get; set; } = 4;
+    [Parameter] public double LengthBeats { get; set; } = 60;
+    [Parameter] public int BeatsPerBar { get; set; } = 4;
+    [Parameter] public double TimeZoom { get; set; } = 1.0;
+    [Parameter] public double PitchZoom { get; set; } = 1.0;
+
+    /// <summary>Raised when wheel/keyboard input proposes new zoom values.</summary>
+    [Parameter] public EventCallback<ZoomChange> OnZoomChanged { get; set; }
+
+    private ElementReference _canvas;
+    private PianoRollInterop _interop = default!;
+    private DotNetObjectReference<PianoRollCallbacks>? _callbacksRef;
+    private bool _initialized;
+    private string _configKey = "";
+
+    protected override void OnInitialized()
+    {
+        _interop = new PianoRollInterop(JS, Navigation);
+        _callbacksRef = DotNetObjectReference.Create(
+            new PianoRollCallbacks(HandleZoomStep, HandleZoomReset));
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        var key = BuildConfigKey();
+
+        if (!_initialized)
+        {
+            await _interop.InitAsync(_canvas, BuildConfig(), _callbacksRef!);
+            _initialized = true;
+            _configKey = key;
+        }
+        else if (key != _configKey)
+        {
+            await _interop.UpdateAsync(BuildConfig());
+            _configKey = key;
+        }
+    }
+
+    private string BuildConfigKey() =>
+        $"{Instrument}|{SubdivisionsPerBeat}|{LengthBeats}|{BeatsPerBar}|{TimeZoom}|{PitchZoom}";
+
+    private PianoRollConfig BuildConfig()
+    {
+        var (min, max) = InstrumentLayout.PitchRange(Instrument);
+        return new PianoRollConfig(
+            InstrumentLayout.IsDrum(Instrument),
+            min,
+            max,
+            LengthBeats,
+            BeatsPerBar,
+            SubdivisionsPerBeat,
+            InstrumentPalette.For(Instrument),
+            TimeZoom,
+            PitchZoom,
+            PianoRollMetrics.BasePixelsPerBeat,
+            PianoRollMetrics.BasePixelsPerSemitone);
+    }
+
+    private async Task HandleZoomStep(string axis, int direction)
+    {
+        var time = TimeZoom;
+        var pitch = PitchZoom;
+
+        if (axis is "time" or "both")
+        {
+            time = ZoomLevels.StepBy(time, direction);
+        }
+        if (axis is "pitch" or "both")
+        {
+            pitch = ZoomLevels.StepBy(pitch, direction);
+        }
+
+        await OnZoomChanged.InvokeAsync(new ZoomChange(time, pitch));
+    }
+
+    private Task HandleZoomReset() => OnZoomChanged.InvokeAsync(new ZoomChange(1.0, 1.0));
+
+    public async ValueTask DisposeAsync()
+    {
+        await _interop.DisposeAsync();
+        _callbacksRef?.Dispose();
+    }
+}

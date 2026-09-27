@@ -8,31 +8,31 @@
 
 <h2>Audio test</h2>
 
-<p class="text-muted">
+<p class="text-dim">
     Click any button first — browsers block audio until a user gesture.
 </p>
 
-<div class="d-flex flex-wrap gap-2 mb-3">
+<div class="row">
     @foreach (var instrument in Instruments)
     {
-        <button class="btn btn-primary" @onclick="() => PlayNoteAsync(instrument)">
+        <button class="btn" style="color:@InstrumentPalette.For(instrument)" @onclick="() => PlayNoteAsync(instrument)">
             @instrument
         </button>
     }
 </div>
 
-<div class="d-flex flex-wrap gap-2 align-items-center mb-2">
-    <button class="btn btn-success" @onclick="StartMetronomeAsync">Start metronome</button>
-    <button class="btn btn-danger" @onclick="StopAsync">Stop</button>
-    <span class="ms-2 font-monospace">Transport: @_transportTime.ToString("F2") s</span>
+<div class="row">
+    <button class="btn btn-accent" @onclick="StartMetronomeAsync">Start metronome</button>
+    <button class="btn" @onclick="StopAsync">Stop</button>
+    <span class="text-dim">Transport: @_transportTime.ToString("F2") s</span>
 </div>
 
 <h2 class="mt-4">Song Player</h2>
 
-<div class="d-flex flex-wrap gap-2 align-items-center mb-2">
-    <button class="btn btn-success" @onclick="LoadAndPlaySampleAsync">Load sample &amp; play</button>
-    <button class="btn btn-danger" @onclick="StopSongAsync">Stop</button>
-    <span class="ms-2">@_songInfo</span>
+<div class="row">
+    <button class="btn btn-accent" @onclick="LoadAndPlaySampleAsync">Load sample &amp; play</button>
+    <button class="btn" @onclick="StopSongAsync">Stop</button>
+    <span class="text-dim">@_songInfo</span>
 </div>
 
 @code {
