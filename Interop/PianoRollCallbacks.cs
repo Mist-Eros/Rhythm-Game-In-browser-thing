@@ -29,6 +29,10 @@ public sealed class PianoRollHandlers
     public required Func<int, double, Task> ResizeNote { get; init; }
     public required Func<Task> ResizeEnd { get; init; }
     public required Func<int, Task> ResizeSelected { get; init; }
+    public required Func<Task> DeleteSelected { get; init; }
+    public required Func<Task> TogglePlay { get; init; }
+    public required Func<int, Task> AuditionStart { get; init; }
+    public required Func<int, Task> AuditionStop { get; init; }
 }
 
 /// <summary>Receives editor intents from wwwroot/js/pianoroll.js via JS interop.</summary>
@@ -61,4 +65,8 @@ public sealed class PianoRollCallbacks
         _h.ResizeNote(index, durationBeats);
     [JSInvokable] public Task OnResizeEnd() => _h.ResizeEnd();
     [JSInvokable] public Task OnResizeSelected(int steps) => _h.ResizeSelected(steps);
+    [JSInvokable] public Task OnDeleteSelected() => _h.DeleteSelected();
+    [JSInvokable] public Task OnTogglePlay() => _h.TogglePlay();
+    [JSInvokable] public Task OnAuditionStart(int midi) => _h.AuditionStart(midi);
+    [JSInvokable] public Task OnAuditionStop(int midi) => _h.AuditionStop(midi);
 }

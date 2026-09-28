@@ -52,6 +52,10 @@
     [Parameter] public EventCallback<NoteResize> OnNoteResized { get; set; }
     [Parameter] public EventCallback OnNoteResizeEnded { get; set; }
     [Parameter] public EventCallback<int> OnSelectionResizeSteps { get; set; }
+    [Parameter] public EventCallback OnDeleteSelected { get; set; }
+    [Parameter] public EventCallback OnTogglePlay { get; set; }
+    [Parameter] public EventCallback<int> OnAuditionStarted { get; set; }
+    [Parameter] public EventCallback<int> OnAuditionStopped { get; set; }
 
     private ElementReference _root;
     private PianoRollInterop _interop = default!;
@@ -89,6 +93,10 @@
                 OnNoteResized.InvokeAsync(new NoteResize(index, durationBeats)),
             ResizeEnd = () => OnNoteResizeEnded.InvokeAsync(),
             ResizeSelected = steps => OnSelectionResizeSteps.InvokeAsync(steps),
+            DeleteSelected = () => OnDeleteSelected.InvokeAsync(),
+            TogglePlay = () => OnTogglePlay.InvokeAsync(),
+            AuditionStart = midi => OnAuditionStarted.InvokeAsync(midi),
+            AuditionStop = midi => OnAuditionStopped.InvokeAsync(midi),
         }));
     }
 

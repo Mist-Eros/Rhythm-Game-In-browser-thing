@@ -62,6 +62,7 @@ const INSTRUMENTS = {
   },
   bass: {
     pitched: true,
+    poly: true,
     create: (T) => {
       const synth = new T.PolySynth(T.MonoSynth).toDestination();
       synth.set({
@@ -83,6 +84,7 @@ const INSTRUMENTS = {
   },
   guitar: {
     pitched: true,
+    poly: true,
     // PolySynth only accepts Monophonic voices (Synth/FMSynth/AMSynth/MonoSynth/DuoSynth).
     // A short plucky Synth envelope approximates a guitar; PluckSynth is NOT Monophonic.
     create: (T) => {
@@ -97,6 +99,7 @@ const INSTRUMENTS = {
   },
   piano: {
     pitched: true,
+    poly: true,
     create: (T) => {
       const synth = new T.PolySynth(T.FMSynth).toDestination();
       synth.set({
@@ -113,6 +116,7 @@ const INSTRUMENTS = {
   },
   musicbox: {
     pitched: true,
+    poly: true,
     create: (T) => {
       const synth = new T.PolySynth(T.Synth).toDestination();
       synth.set({
@@ -204,6 +208,38 @@ export function playInstrument(name, note = "C4", durationSec = 0.5, timeSec = n
     return null;
   }
   return T.Transport.scheduleOnce((audioTime) => fire(audioTime), timeSec);
+}
+
+/**
+ * Attack a note and hold it (used for click-auditioning). Polyphonic instruments
+ * sustain until stopNote(); drums fire a short one-shot since they don't sustain.
+ */
+export function startNote(name, pitch, velocity = 0.8) {
+  const T = getTone();
+  const def = INSTRUMENTS[name];
+  const inst = instances[name];
+  if (!def || !inst) {
+    throw new Error(`Unknown or uninitialized instrument: ${name}`);
+  }
+  const vel = clampVelocity(velocity);
+  if (def.poly) {
+    inst.triggerAttack(pitch, T.now(), vel);
+  } else if (def.trigger) {
+    def.trigger(inst, pitch, 0.25, T.now(), vel);
+  } else {
+    inst.triggerAttackRelease(0.25, T.now(), vel);
+  }
+}
+
+/** Release a held note started with startNote(). No-op for non-sustaining drums. */
+export function stopNote(name, pitch) {
+  const T = getTone();
+  const def = INSTRUMENTS[name];
+  const inst = instances[name];
+  if (!def || !inst || !def.poly) {
+    return;
+  }
+  inst.triggerRelease(pitch, T.now());
 }
 
 export async function startTransport() {

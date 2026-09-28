@@ -118,7 +118,11 @@
                    OnCut="CutSelection"
                    OnNoteResized="ResizeNote"
                    OnNoteResizeEnded="ResizeNoteEnd"
-                   OnSelectionResizeSteps="ResizeSelectedNote" />
+                   OnSelectionResizeSteps="ResizeSelectedNote"
+                   OnDeleteSelected="DeleteSelectedNotes"
+                   OnTogglePlay="TogglePlay"
+                   OnAuditionStarted="AuditionStart"
+                   OnAuditionStopped="AuditionStop" />
     </div>
 </div>
 
@@ -678,6 +682,67 @@
         _revision++;
     }
 
+    // --- delete selection / transport / audition -----------------------------
+
+    private void DeleteSelectedNotes()
+    {
+        if (_state.SelectedNoteIds.Count == 0)
+        {
+            return;
+        }
+
+        PushUndo();
+        var track = _state.CurrentTrack;
+        track.Notes.RemoveAll(n => _state.SelectedNoteIds.Contains(n.Id));
+        _state.SelectedNoteIds.Clear();
+        _revision++;
+    }
+
+    private async Task TogglePlay()
+    {
+        if (_state.IsPlaying)
+        {
+            await PauseAsync();
+            return;
+        }
+        // Start from the beginning of the song.
+        _state.CurrentBeat = 0;
+        await PlayAsync();
+    }
+
+    private async Task AuditionStart(int midi)
+    {
+        await _audio.InitAsync();
+        await _audio.StartNoteAsync(
+            _state.SelectedInstrument, PitchMath.MidiToName(NormalizeMidi(midi)));
+    }
+
+    private async Task AuditionStop(int midi)
+    {
+        await _audio.StopNoteAsync(
+            _state.SelectedInstrument, PitchMath.MidiToName(NormalizeMidi(midi)));
+    }
+
+    /// <summary>Last note end in seconds plus a one-second grace period, for auto-reset.</summary>
+    private double EndTimeSeconds()
+    {
+        var max = 0.0;
+        var any = false;
+        foreach (var track in _state.WorkingSong.Tracks)
+        {
+            foreach (var note in track.Notes)
+            {
+                any = true;
+                var end = TimingService.BeatsToSeconds(note.Beat + note.Duration, _state.Bpm);
+                if (end > max)
+                {
+                    max = end;
+                }
+            }
+        }
+        return any ? max + 1.0 : double.PositiveInfinity;
+    }
+
     private static long StepIndex(double beat, double step) => (long)Math.Round(beat / step);
 
     private static int NoteMidi(string pitch) =>
@@ -732,6 +797,15 @@
                     return;
                 }
                 var seconds = await _audio.GetTransportTimeSecAsync();
+
+                // Auto-stop one second after the last note ends, then reset to 0.
+                if (seconds >= EndTimeSeconds())
+                {
+                    await StopAsync();
+                    StateHasChanged();
+                    return;
+                }
+
                 _state.CurrentBeat = TimingService.SecondsToBeats(seconds, _state.Bpm);
                 StateHasChanged();
             });

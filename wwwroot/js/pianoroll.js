@@ -81,10 +81,77 @@ function metrics() {
   };
 }
 
-// Positive result = higher pitch, negative = lower. Canvas Y grows downward,
-// but pitch grows upward, so invert the Y difference.
-function canvasYToPitchOffset(startY, currentY, pixelsPerSemitone) {
-  return (startY - currentY) / pixelsPerSemitone;
+const SHARP_PITCH_CLASSES = new Set([1, 3, 6, 8, 10]);
+
+function isSharpPitch(midi) {
+  return SHARP_PITCH_CLASSES.has(((midi % 12) + 12) % 12);
+}
+
+// --- pitch geometry: the ONE source of truth for pitch <-> Y ------------------
+// Rows are non-uniform: naturals are full height, sharps/flats are half height.
+// A cumulative-offset table maps a MIDI pitch to its Y within the grid and back.
+
+function buildRowGeometry() {
+  const config = active.config;
+  const full = config.basePixelsPerSemitone * config.pitchZoom;
+  const rows = config.pitchMax - config.pitchMin + 1;
+  const offsets = new Array(rows + 1);
+  offsets[0] = 0;
+  for (let i = 0; i < rows; i++) {
+    const pitch = config.pitchMax - i;
+    offsets[i + 1] = offsets[i] + (isSharpPitch(pitch) ? full * 0.5 : full);
+  }
+  return { offsets, rows, total: offsets[rows], full, half: full * 0.5 };
+}
+
+function geometry() {
+  const config = active.config;
+  const key = `${config.pitchZoom}|${config.pitchMin}|${config.pitchMax}|${config.basePixelsPerSemitone}`;
+  if (!active.geom || active.geomKey !== key) {
+    active.geom = buildRowGeometry();
+    active.geomKey = key;
+  }
+  return active.geom;
+}
+
+/** Pixel offset from the top of the grid to a pitch's row. */
+function pitchToY(midi) {
+  const g = geometry();
+  const i = active.config.pitchMax - midi;
+  if (i <= 0) {
+    return 0;
+  }
+  if (i >= g.rows) {
+    return g.total;
+  }
+  return g.offsets[i];
+}
+
+/** Row height for a pitch (full for naturals, half for sharps). */
+function pitchHeight(midi) {
+  const g = geometry();
+  return isSharpPitch(midi) ? g.half : g.full;
+}
+
+/** Pitch at a pixel offset from the top of the grid (linear scan over ~60 rows). */
+function yToPitch(y) {
+  const g = geometry();
+  if (y <= 0) {
+    return active.config.pitchMax;
+  }
+  if (y >= g.total) {
+    return active.config.pitchMin;
+  }
+  let i = 0;
+  while (i < g.rows - 1 && g.offsets[i + 1] <= y) {
+    i++;
+  }
+  return active.config.pitchMax - i;
+}
+
+function clampMidi(midi) {
+  const config = active.config;
+  return Math.max(config.pitchMin, Math.min(config.pitchMax, midi));
 }
 
 function snapBeats() {
@@ -95,15 +162,13 @@ function computeLayout() {
   const { scroller, config } = active;
   const vw = scroller.clientWidth;
   const vh = scroller.clientHeight;
-  const rows = config.pitchMax - config.pitchMin + 1;
-  const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+  const g = geometry();
+  const { pixelsPerBeat } = metrics();
   const stepWidth = pixelsPerBeat / config.subdivisionsPerBeat;
   const totalSteps = Math.max(1, Math.round(config.lengthBeats * config.subdivisionsPerBeat));
   const gridW = totalSteps * stepWidth;
-  const gridH = rows * pixelsPerSemitone;
   return {
-    vw, vh, rows, stepWidth, totalSteps, gridW, gridH,
-    rowHeight: pixelsPerSemitone, pixelsPerBeat,
+    vw, vh, rows: g.rows, stepWidth, totalSteps, gridW, gridH: g.total, pixelsPerBeat,
   };
 }
 
@@ -125,30 +190,12 @@ function eventToCanvasPixels(canvas, event) {
   };
 }
 
-/** Snaps a raw beat to the grid cell start, clamped to the song length. */
-function pixelsToCell(x, y, pixelsPerBeat, pixelsPerSemitone, snap) {
+/** Snap a raw beat and map a grid Y to a snapped (beat, midi) cell. */
+function pixelsToCell(x, y, pixelsPerBeat, snap) {
   const rawBeat = x / pixelsPerBeat;
   const maxBeat = Math.max(0, active.config.lengthBeats - snap);
   const snappedBeat = Math.max(0, Math.min(maxBeat, Math.floor(rawBeat / snap) * snap));
-  const semitoneIndex = Math.floor(y / pixelsPerSemitone);
-  return { beat: snappedBeat, semitoneIndex, rawBeat };
-}
-
-function rawSemitoneAt(y, pixelsPerSemitone) {
-  return y / pixelsPerSemitone;
-}
-
-function cellToPixels(beat, semitoneIndex, pixelsPerBeat, pixelsPerSemitone) {
-  return { x: beat * pixelsPerBeat, y: semitoneIndex * pixelsPerSemitone };
-}
-
-function midiForSemitone(semitoneIndex) {
-  return active.config.pitchMax - semitoneIndex;
-}
-
-function clampMidi(midi) {
-  const config = active.config;
-  return Math.max(config.pitchMin, Math.min(config.pitchMax, midi));
+  return { beat: snappedBeat, midi: clampMidi(yToPitch(y)), rawBeat };
 }
 
 // --- canvas sizing -----------------------------------------------------------
@@ -211,12 +258,13 @@ function drawGrid(L, scrollLeft, scrollTop, colors) {
   ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, L.vw, L.vh);
 
-  const firstRow = Math.max(0, Math.floor(scrollTop / L.rowHeight));
-  const lastRow = Math.min(L.rows - 1, Math.floor((scrollTop + L.vh) / L.rowHeight));
-  for (let r = firstRow; r <= lastRow; r++) {
-    const pitch = config.pitchMax - r;
-    const y = Math.round(r * L.rowHeight - scrollTop) + 0.5;
-    const isC = ((pitch % 12) + 12) % 12 === 0;
+  const g = geometry();
+  for (let i = 0; i <= g.rows; i++) {
+    const y = Math.round(g.offsets[i] - scrollTop) + 0.5;
+    if (y < -1 || y > L.vh + 1) {
+      continue;
+    }
+    const isC = i < g.rows && ((config.pitchMax - i) % 12 + 12) % 12 === 0;
     ctx.strokeStyle = isC ? colors.borderBright : colors.border;
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -285,8 +333,9 @@ function drawSelectionBand(colors) {
 function noteRect(note, L, scrollLeft, scrollTop) {
   const x = note.beat * L.pixelsPerBeat - scrollLeft;
   const w = Math.max(4, note.duration * L.pixelsPerBeat);
-  const y = (active.config.pitchMax - note.midi) * L.rowHeight - scrollTop;
-  return { x, y, w, h: L.rowHeight };
+  const y = pitchToY(note.midi) - scrollTop;
+  const h = Math.max(2, pitchHeight(note.midi) - 1);
+  return { x, y, w, h };
 }
 
 function drawNotes(L, scrollLeft, scrollTop) {
@@ -397,25 +446,68 @@ function drawKeys(L, scrollTop, colors) {
   if (w === 0 || h === 0) {
     return;
   }
+
+  const config = active.config;
+  const g = geometry();
+
+  // Opaque base so nothing behind the column can show through.
   ctx.fillStyle = colors.panel;
   ctx.fillRect(0, 0, w, h);
 
-  const firstRow = Math.max(0, Math.floor(scrollTop / L.rowHeight));
-  const lastRow = Math.min(L.rows - 1, Math.floor((scrollTop + h) / L.rowHeight));
-
-  ctx.font = "10px 'JetBrains Mono', monospace";
+  ctx.font = "9px 'JetBrains Mono', monospace";
   ctx.textBaseline = "middle";
 
-  for (let r = firstRow; r <= lastRow; r++) {
-    const pitch = active.config.pitchMax - r;
-    const y = r * L.rowHeight - scrollTop;
-    const isC = ((pitch % 12) + 12) % 12 === 0;
-    ctx.fillStyle = isC ? colors.panel2 : colors.bg;
-    ctx.fillRect(0, y, w - 1, Math.max(1, L.rowHeight - 1));
-    if (isC || L.rowHeight >= 16) {
-      ctx.fillStyle = isC ? colors.borderBright : colors.textDim;
-      ctx.fillText(noteName(pitch), 4, y + L.rowHeight / 2);
+  for (let i = 0; i < g.rows; i++) {
+    const pitch = config.pitchMax - i;
+    const rowTop = g.offsets[i] - scrollTop;
+    const rowBottom = g.offsets[i + 1] - scrollTop;
+    const rowH = rowBottom - rowTop;
+    if (rowBottom < 0 || rowTop > h) {
+      continue;
     }
+
+    const hovered = active.hoverKey === pitch;
+
+    // Full-height stripe for the row so boundaries read even when the key is short.
+    ctx.fillStyle = isSharpPitch(pitch) ? colors.bg : colors.panel2;
+    ctx.fillRect(0, rowTop, w, rowH);
+
+    if (isSharpPitch(pitch)) {
+      // Black key: same width as a white key (small horizontal inset), centered in
+      // its (already half-height) row slot.
+      const x = 3;
+      const bw = w - 6;
+      const y = rowTop + 1;
+      const bh = Math.max(1, rowH - 2);
+
+      ctx.fillStyle = hovered ? "#2a2a3c" : "#101018";
+      ctx.fillRect(x, y, bw, bh);
+      ctx.strokeStyle = colors.borderBright;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, bw - 1, Math.max(1, bh - 1));
+
+      ctx.fillStyle = "#f0f0f5";
+      ctx.fillText(noteName(pitch), x + 4, rowTop + rowH / 2);
+    } else {
+      const height = Math.max(1, rowH - 1);
+
+      ctx.fillStyle = hovered ? "#ffffff" : "#e0e0e6";
+      ctx.fillRect(0, rowTop, w, height);
+      ctx.strokeStyle = "#0a0a12";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(0.5, rowTop + 0.5, w - 1, Math.max(1, height - 1));
+
+      ctx.fillStyle = "#101018";
+      ctx.fillText(noteName(pitch), 4, rowTop + rowH / 2);
+    }
+
+    // Row separator.
+    ctx.strokeStyle = colors.border;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, Math.round(rowTop) + 0.5);
+    ctx.lineTo(w, Math.round(rowTop) + 0.5);
+    ctx.stroke();
   }
 
   ctx.strokeStyle = colors.borderBright;
@@ -433,20 +525,21 @@ function drawDebug(L, scrollLeft, scrollTop, colors) {
   }
   const ctx = active.gridCtx;
   const { x, y } = active.lastPointer;
-  const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+  const { pixelsPerBeat } = metrics();
   const snap = snapBeats();
 
-  const cell = pixelsToCell(x + scrollLeft, y + scrollTop, pixelsPerBeat, pixelsPerSemitone, snap);
-  const rect = cellToPixels(cell.beat, cell.semitoneIndex, pixelsPerBeat, pixelsPerSemitone);
+  const cell = pixelsToCell(x + scrollLeft, y + scrollTop, pixelsPerBeat, snap);
+  const cellX = cell.beat * pixelsPerBeat - scrollLeft;
+  const cellY = pitchToY(cell.midi) - scrollTop;
 
   ctx.save();
   ctx.strokeStyle = "#ff2e63";
   ctx.lineWidth = 1;
   ctx.strokeRect(
-    Math.round(rect.x - scrollLeft) + 0.5,
-    Math.round(rect.y - scrollTop) + 0.5,
+    Math.round(cellX) + 0.5,
+    Math.round(cellY) + 0.5,
     Math.round(snap * pixelsPerBeat),
-    Math.round(pixelsPerSemitone),
+    Math.max(1, Math.round(pitchHeight(cell.midi))),
   );
   ctx.beginPath();
   ctx.moveTo(x - 10, y);
@@ -617,7 +710,13 @@ function onPointerDown(event) {
       pointerId: event.pointerId,
       startBeat: Math.floor((x + scrollLeft) / pixelsPerBeat / snap) * snap,
       startY: y,
+      startX: x,
+      startMidi: yToPitch(y + scrollTop),
+      moved: false,
     };
+    // Hold to audition the pitch; cancelled if this turns into a drag.
+    active.audition = note.midi;
+    invoke("OnAuditionStart", note.midi);
     invoke("OnSelectionDragStart");
     canvas.setPointerCapture(event.pointerId);
     canvas.style.cursor = "move";
@@ -654,13 +753,23 @@ function onPointerMove(event) {
     }
 
     if (active.drag.kind === "move") {
-      const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+      // Once the pointer moves past a small threshold this is a drag, not a click,
+      // so cancel the audition.
+      if (!active.drag.moved &&
+          (Math.abs(x - active.drag.startX) > 4 || Math.abs(y - active.drag.startY) > 4)) {
+        active.drag.moved = true;
+        if (active.audition !== null) {
+          invoke("OnAuditionStop", active.audition);
+          active.audition = null;
+        }
+      }
+
+      const { pixelsPerBeat } = metrics();
       const snap = snapBeats();
       const curBeat = Math.floor((x + scrollLeft) / pixelsPerBeat / snap) * snap;
       const beatSteps = Math.round((curBeat - active.drag.startBeat) / snap);
-      // canvasYToPitchOffset: up on screen => positive => higher pitch.
-      const rowSteps = Math.round(
-        canvasYToPitchOffset(active.drag.startY, y, pixelsPerSemitone));
+      // Non-uniform rows: map both Y positions to pitches and take the difference.
+      const rowSteps = yToPitch(y + scrollTop) - active.drag.startMidi;
       invoke("OnSelectionDragUpdate", beatSteps, rowSteps);
       schedule();
       return;
@@ -702,6 +811,11 @@ function onPointerUp(event) {
   active.band = null;
   active.gridCanvas.style.cursor = "crosshair";
 
+  if (active.audition !== null) {
+    invoke("OnAuditionStop", active.audition);
+    active.audition = null;
+  }
+
   if (drag.kind === "move") {
     invoke("OnSelectionDragEnd");
     return;
@@ -718,17 +832,95 @@ function onPointerUp(event) {
       invoke("OnSelectNotes", notesInBand(drag, computeLayout()));
     } else {
       // Plain click on empty grid: place a note for the selected instrument.
-      const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+      const { pixelsPerBeat } = metrics();
       const cell = pixelsToCell(
         drag.x0 + active.scroller.scrollLeft,
         drag.y0 + active.scroller.scrollTop,
         pixelsPerBeat,
-        pixelsPerSemitone,
         snapBeats());
-      invoke("OnPlaceNote", cell.beat, clampMidi(midiForSemitone(cell.semitoneIndex)));
+      invoke("OnPlaceNote", cell.beat, cell.midi);
     }
     schedule();
   }
+}
+
+// --- piano keyboard column ---------------------------------------------------
+
+function keyPitchAt(y, scrollTop) {
+  const contentY = y + scrollTop;
+  if (contentY < 0 || contentY >= geometry().total) {
+    return null;
+  }
+  return yToPitch(contentY);
+}
+
+function keysPointerY(event) {
+  const canvas = active.keysCanvas;
+  const rect = canvas.getBoundingClientRect();
+  const scaleY = rect.height === 0 ? 1 : canvas.height / rect.height;
+  return ((event.clientY - rect.top) * scaleY) / (window.devicePixelRatio || 1);
+}
+
+function onKeysDown(event) {
+  if (!active) {
+    return;
+  }
+  const pitch = keyPitchAt(keysPointerY(event), active.scroller.scrollTop);
+  if (pitch === null) {
+    return;
+  }
+  event.preventDefault();
+  active.hoverKey = pitch;
+  active.keyAudition = pitch;
+  invoke("OnAuditionStart", pitch);
+  active.keysCanvas.setPointerCapture(event.pointerId);
+  schedule();
+}
+
+function onKeysMove(event) {
+  if (!active) {
+    return;
+  }
+  const pitch = keyPitchAt(keysPointerY(event), active.scroller.scrollTop);
+
+  // Glissando: while held, release the previous key and sound the new one.
+  if (active.keyAudition !== null && event.buttons) {
+    if (pitch !== null && pitch !== active.keyAudition) {
+      invoke("OnAuditionStop", active.keyAudition);
+      active.keyAudition = pitch;
+      invoke("OnAuditionStart", pitch);
+    }
+    active.hoverKey = pitch;
+    schedule();
+    return;
+  }
+
+  if (pitch !== active.hoverKey) {
+    active.hoverKey = pitch;
+    schedule();
+  }
+}
+
+function onKeysUp(event) {
+  if (!active) {
+    return;
+  }
+  if (active.keyAudition !== null) {
+    invoke("OnAuditionStop", active.keyAudition);
+    active.keyAudition = null;
+  }
+  if (active.keysCanvas.hasPointerCapture && active.keysCanvas.hasPointerCapture(event.pointerId)) {
+    active.keysCanvas.releasePointerCapture(event.pointerId);
+  }
+  schedule();
+}
+
+function onKeysLeave() {
+  if (!active || active.keyAudition !== null) {
+    return;
+  }
+  active.hoverKey = null;
+  schedule();
 }
 
 function teardown() {
@@ -772,6 +964,9 @@ export function init(root, rawConfig, dotNet) {
     raf: 0,
     drag: null,
     band: null,
+    audition: null,
+    hoverKey: null,
+    keyAudition: null,
     lastPointer: null,
     cleanup: null,
   };
@@ -796,10 +991,22 @@ export function init(root, rawConfig, dotNet) {
 
   const onKey = (event) => {
     // Never hijack keys while typing in a form control.
-    const target = event.target;
-    const tag = target && target.tagName ? target.tagName : "";
+    const focused = document.activeElement;
+    const tag = focused && focused.tagName ? focused.tagName : "";
     if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" ||
-        (target && target.isContentEditable)) {
+        (focused && focused.isContentEditable)) {
+      return;
+    }
+
+    if (event.key === "Delete" || event.key === "Backspace") {
+      invoke("OnDeleteSelected");
+      event.preventDefault();
+      return;
+    }
+
+    if (event.key === " " || event.code === "Space") {
+      invoke("OnTogglePlay");
+      event.preventDefault();
       return;
     }
 
@@ -890,6 +1097,12 @@ export function init(root, rawConfig, dotNet) {
   gridCanvas.addEventListener("pointerup", onPointerUp);
   gridCanvas.addEventListener("pointercancel", onPointerUp);
   gridCanvas.addEventListener("contextmenu", onContextMenu);
+  keysCanvas.style.cursor = "pointer";
+  keysCanvas.addEventListener("pointerdown", onKeysDown);
+  keysCanvas.addEventListener("pointermove", onKeysMove);
+  keysCanvas.addEventListener("pointerup", onKeysUp);
+  keysCanvas.addEventListener("pointercancel", onKeysUp);
+  keysCanvas.addEventListener("pointerleave", onKeysLeave);
   window.addEventListener("keydown", onKey);
   window.addEventListener("resize", onResize);
 
@@ -901,6 +1114,11 @@ export function init(root, rawConfig, dotNet) {
     gridCanvas.removeEventListener("pointerup", onPointerUp);
     gridCanvas.removeEventListener("pointercancel", onPointerUp);
     gridCanvas.removeEventListener("contextmenu", onContextMenu);
+    keysCanvas.removeEventListener("pointerdown", onKeysDown);
+    keysCanvas.removeEventListener("pointermove", onKeysMove);
+    keysCanvas.removeEventListener("pointerup", onKeysUp);
+    keysCanvas.removeEventListener("pointercancel", onKeysUp);
+    keysCanvas.removeEventListener("pointerleave", onKeysLeave);
     window.removeEventListener("keydown", onKey);
     window.removeEventListener("resize", onResize);
     observer.disconnect();

@@ -66,6 +66,14 @@ public sealed class AudioInterop : IAsyncDisposable
     public async ValueTask SetBpmAsync(double bpm)
         => await (await GetModuleAsync()).InvokeVoidAsync("setBpm", bpm);
 
+    /// <summary>Attacks and holds a note (click-audition). Drums fire a short one-shot.</summary>
+    public async ValueTask StartNoteAsync(string name, string pitch, double velocity = 0.8)
+        => await (await GetModuleAsync()).InvokeVoidAsync("startNote", name, pitch, velocity);
+
+    /// <summary>Releases a note started with <see cref="StartNoteAsync"/>. No-op for drums.</summary>
+    public async ValueTask StopNoteAsync(string name, string pitch)
+        => await (await GetModuleAsync()).InvokeVoidAsync("stopNote", name, pitch);
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed)
