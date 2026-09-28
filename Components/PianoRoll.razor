@@ -36,6 +36,22 @@
     [Parameter] public EventCallback<NotePlacement> OnNotePlaced { get; set; }
     [Parameter] public EventCallback<NoteMove> OnNoteMoved { get; set; }
     [Parameter] public EventCallback<int> OnNoteDeleted { get; set; }
+    [Parameter] public EventCallback<string[]> OnSelectionChanged { get; set; }
+    [Parameter] public EventCallback<string> OnNoteToggled { get; set; }
+    [Parameter] public EventCallback OnSelectAll { get; set; }
+    [Parameter] public EventCallback OnSelectionCleared { get; set; }
+    [Parameter] public EventCallback OnSelectionDragStarted { get; set; }
+    [Parameter] public EventCallback<SelectionDelta> OnSelectionDragged { get; set; }
+    [Parameter] public EventCallback OnSelectionDragEnded { get; set; }
+    [Parameter] public EventCallback<SelectionDelta> OnNudged { get; set; }
+    [Parameter] public EventCallback OnUndo { get; set; }
+    [Parameter] public EventCallback OnRedo { get; set; }
+    [Parameter] public EventCallback OnCopy { get; set; }
+    [Parameter] public EventCallback OnPaste { get; set; }
+    [Parameter] public EventCallback OnCut { get; set; }
+    [Parameter] public EventCallback<NoteResize> OnNoteResized { get; set; }
+    [Parameter] public EventCallback OnNoteResizeEnded { get; set; }
+    [Parameter] public EventCallback<int> OnSelectionResizeSteps { get; set; }
 
     private ElementReference _root;
     private PianoRollInterop _interop = default!;
@@ -47,12 +63,33 @@
     protected override void OnInitialized()
     {
         _interop = new PianoRollInterop(JS, Navigation);
-        _callbacksRef = DotNetObjectReference.Create(new PianoRollCallbacks(
-            HandleZoomStep,
-            HandleZoomReset,
-            (beat, midi) => OnNotePlaced.InvokeAsync(new NotePlacement(beat, midi)),
-            (index, beat, midi) => OnNoteMoved.InvokeAsync(new NoteMove(index, beat, midi)),
-            index => OnNoteDeleted.InvokeAsync(index)));
+        _callbacksRef = DotNetObjectReference.Create(new PianoRollCallbacks(new PianoRollHandlers
+        {
+            ZoomStep = HandleZoomStep,
+            ZoomReset = HandleZoomReset,
+            PlaceNote = (beat, midi) => OnNotePlaced.InvokeAsync(new NotePlacement(beat, midi)),
+            MoveNote = (index, beat, midi) => OnNoteMoved.InvokeAsync(new NoteMove(index, beat, midi)),
+            DeleteNote = index => OnNoteDeleted.InvokeAsync(index),
+            SelectNotes = ids => OnSelectionChanged.InvokeAsync(ids),
+            ToggleNote = id => OnNoteToggled.InvokeAsync(id),
+            SelectAll = () => OnSelectAll.InvokeAsync(),
+            ClearSelection = () => OnSelectionCleared.InvokeAsync(),
+            SelectionDragStart = () => OnSelectionDragStarted.InvokeAsync(),
+            SelectionDragUpdate = (beatSteps, rowSteps) =>
+                OnSelectionDragged.InvokeAsync(new SelectionDelta(beatSteps, rowSteps)),
+            SelectionDragEnd = () => OnSelectionDragEnded.InvokeAsync(),
+            Nudge = (beatSteps, rowSteps) =>
+                OnNudged.InvokeAsync(new SelectionDelta(beatSteps, rowSteps)),
+            Undo = () => OnUndo.InvokeAsync(),
+            Redo = () => OnRedo.InvokeAsync(),
+            Copy = () => OnCopy.InvokeAsync(),
+            Paste = () => OnPaste.InvokeAsync(),
+            Cut = () => OnCut.InvokeAsync(),
+            ResizeNote = (index, durationBeats) =>
+                OnNoteResized.InvokeAsync(new NoteResize(index, durationBeats)),
+            ResizeEnd = () => OnNoteResizeEnded.InvokeAsync(),
+            ResizeSelected = steps => OnSelectionResizeSteps.InvokeAsync(steps),
+        }));
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)

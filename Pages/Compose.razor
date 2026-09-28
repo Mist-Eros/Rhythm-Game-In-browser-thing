@@ -35,6 +35,17 @@
             <InputFile OnChange="LoadAsync" accept=".json" style="display:none" />
         </label>
 
+        <button class="btn" @onclick="CopySelection" title="Copy selection (Ctrl+C)">Copy</button>
+        <button class="btn" @onclick="PasteClipboard" title="Paste staircase (Ctrl+V)">Paste</button>
+        <button class="btn" @onclick="CutSelection" title="Cut selection (Ctrl+X)">Cut</button>
+        <button class="btn" @onclick="Undo" title="Undo (Ctrl+Z)">Undo</button>
+        <button class="btn" @onclick="Redo" title="Redo (Ctrl+Y)">Redo</button>
+
+        @if (!string.IsNullOrEmpty(_status))
+        {
+            <span class="status-msg">@_status</span>
+        }
+
         <span class="spacer"></span>
 
         <div class="zoom-controls">
@@ -91,7 +102,23 @@
                    OnZoomChanged="ApplyZoomChange"
                    OnNotePlaced="PlaceNote"
                    OnNoteMoved="MoveNote"
-                   OnNoteDeleted="DeleteNote" />
+                   OnNoteDeleted="DeleteNote"
+                   OnSelectionChanged="SelectNotes"
+                   OnNoteToggled="ToggleNoteSelection"
+                   OnSelectAll="SelectAllNotes"
+                   OnSelectionCleared="ClearSelection"
+                   OnSelectionDragStarted="BeginSelectionDrag"
+                   OnSelectionDragged="UpdateSelectionDrag"
+                   OnSelectionDragEnded="EndSelectionDrag"
+                   OnNudged="NudgeSelection"
+                   OnUndo="Undo"
+                   OnRedo="Redo"
+                   OnCopy="CopySelection"
+                   OnPaste="PasteClipboard"
+                   OnCut="CutSelection"
+                   OnNoteResized="ResizeNote"
+                   OnNoteResizeEnded="ResizeNoteEnd"
+                   OnSelectionResizeSteps="ResizeSelectedNote" />
     </div>
 </div>
 
@@ -103,6 +130,17 @@
     private System.Timers.Timer? _playTimer;
     private int _revision;
     private string _error = "";
+    private readonly Dictionary<Guid, (double Beat, int Midi)> _dragOriginals = new();
+
+    private const int UndoLimit = 100;
+    private readonly List<Song> _undo = [];
+    private readonly List<Song> _redo = [];
+    private readonly List<Note> _clipboard = [];
+    private double _clipboardRefBeat;
+    private int _pasteCount;
+    private string _status = "";
+    private bool _dragSnapshotTaken;
+    private bool _resizeSnapshotTaken;
 
     // Coordinate debug overlay: set true to draw a crosshair + target cell.
     private bool DebugOverlay { get; set; }
@@ -117,7 +155,17 @@
         _playTimer.Elapsed += async (_, _) => await PollAsync();
     }
 
-    private void SelectInstrument(string instrument) => _state.SelectedInstrument = instrument;
+    private void SelectInstrument(string instrument)
+    {
+        if (_state.SelectedInstrument == instrument)
+        {
+            return;
+        }
+        _state.SelectedInstrument = instrument;
+        // Selection is per-track, so it cannot survive an instrument change.
+        _state.SelectedNoteIds.Clear();
+        _revision++;
+    }
 
     /// <summary>
     /// Builds the render list for the piano roll. Every track is treated identically:
@@ -138,7 +186,9 @@
             {
                 var note = track.Notes[i];
                 var midi = NormalizeMidi(PitchMath.TryNameToMidi(note.Pitch, out var m) ? m : 60);
-                result.Add(new PianoRollNote(note.Beat, midi, note.Duration, color, selected, i));
+                var chosen = selected && _state.SelectedNoteIds.Contains(note.Id);
+                result.Add(new PianoRollNote(
+                    note.Beat, midi, note.Duration, color, selected, i, note.Id.ToString(), chosen));
             }
         }
 
@@ -156,6 +206,7 @@
             return;
         }
 
+        PushUndo();
         track.Notes.Add(new Note
         {
             Beat = placement.Beat,
@@ -224,9 +275,413 @@
             return;
         }
 
+        _state.SelectedNoteIds.Remove(track.Notes[index].Id);
+        PushUndo();
         track.Notes.RemoveAt(index);
         _revision++;
     }
+
+    private void SelectNotes(string[] ids)
+    {
+        _state.SelectedNoteIds.Clear();
+        foreach (var id in ids)
+        {
+            if (Guid.TryParse(id, out var guid))
+            {
+                _state.SelectedNoteIds.Add(guid);
+            }
+        }
+        _revision++;
+    }
+
+    private void ToggleNoteSelection(string id)
+    {
+        if (!Guid.TryParse(id, out var guid))
+        {
+            return;
+        }
+        if (!_state.SelectedNoteIds.Add(guid))
+        {
+            _state.SelectedNoteIds.Remove(guid);
+        }
+        _revision++;
+    }
+
+    private void SelectAllNotes()
+    {
+        _state.SelectedNoteIds.Clear();
+        foreach (var note in _state.CurrentTrack.Notes)
+        {
+            _state.SelectedNoteIds.Add(note.Id);
+        }
+        _revision++;
+    }
+
+    private void ClearSelection()
+    {
+        if (_state.SelectedNoteIds.Count == 0)
+        {
+            return;
+        }
+        _state.SelectedNoteIds.Clear();
+        _revision++;
+    }
+
+    private void BeginSelectionDrag()
+    {
+        _dragOriginals.Clear();
+        foreach (var note in _state.CurrentTrack.Notes)
+        {
+            if (_state.SelectedNoteIds.Contains(note.Id))
+            {
+                _dragOriginals[note.Id] = (note.Beat, NoteMidi(note.Pitch));
+            }
+        }
+    }
+
+    private void UpdateSelectionDrag(SelectionDelta delta)
+    {
+        // Undo granularity: one snapshot per drag gesture, taken on the first move
+        // that actually changes something (not per frame, and not for a plain click).
+        var before = _dragSnapshotTaken ? null : _state.WorkingSong.DeepClone();
+        if (!ApplySelectionDelta(delta, _dragOriginals) || _dragSnapshotTaken)
+        {
+            return;
+        }
+        PushUndoSnapshot(before!);
+        _dragSnapshotTaken = true;
+    }
+
+    private void EndSelectionDrag()
+    {
+        _dragOriginals.Clear();
+        _dragSnapshotTaken = false;
+    }
+
+    private void NudgeSelection(SelectionDelta delta)
+    {
+        var originals = new Dictionary<Guid, (double Beat, int Midi)>();
+        foreach (var note in _state.CurrentTrack.Notes)
+        {
+            if (_state.SelectedNoteIds.Contains(note.Id))
+            {
+                originals[note.Id] = (note.Beat, NoteMidi(note.Pitch));
+            }
+        }
+        if (originals.Count == 0)
+        {
+            return;
+        }
+
+        var before = _state.WorkingSong.DeepClone();
+        if (ApplySelectionDelta(delta, originals))
+        {
+            PushUndoSnapshot(before);
+        }
+    }
+
+    /// <summary>
+    /// Moves every note in <paramref name="originals"/> by the delta. If any note would
+    /// land on an unselected note (same beat + pitch, same track) the whole move is
+    /// refused and false is returned, so the notes stay where they were.
+    /// </summary>
+    private bool ApplySelectionDelta(
+        SelectionDelta delta, IReadOnlyDictionary<Guid, (double Beat, int Midi)> originals)
+    {
+        if (originals.Count == 0)
+        {
+            return false;
+        }
+
+        var track = _state.CurrentTrack;
+        var step = _state.SnapBeats;
+
+        var blocked = new HashSet<(long Step, int Midi)>();
+        foreach (var note in track.Notes)
+        {
+            if (!originals.ContainsKey(note.Id))
+            {
+                blocked.Add((StepIndex(note.Beat, step), NoteMidi(note.Pitch)));
+            }
+        }
+
+        var moves = new List<(Guid Id, double Beat, int Midi)>();
+        foreach (var note in track.Notes)
+        {
+            if (!originals.TryGetValue(note.Id, out var origin))
+            {
+                continue;
+            }
+            var beat = Math.Max(0, origin.Beat + delta.BeatSteps * step);
+            var midi = Math.Clamp(
+                origin.Midi + delta.RowSteps,
+                InstrumentLayout.PitchMinMidi,
+                InstrumentLayout.PitchMaxMidi);
+
+            if (blocked.Contains((StepIndex(beat, step), midi)))
+            {
+                return false; // collision with an unselected note: refuse the whole move
+            }
+            moves.Add((note.Id, beat, midi));
+        }
+
+        foreach (var (id, beat, midi) in moves)
+        {
+            var index = track.Notes.FindIndex(n => n.Id == id);
+            if (index >= 0)
+            {
+                track.Notes[index] = track.Notes[index] with
+                {
+                    Beat = beat,
+                    Pitch = PitchMath.MidiToName(midi),
+                };
+            }
+        }
+        _revision++;
+        return true;
+    }
+
+    // --- undo / redo ---------------------------------------------------------
+
+    private void PushUndo() => PushUndoSnapshot(_state.WorkingSong.DeepClone());
+
+    private void PushUndoSnapshot(Song before)
+    {
+        _undo.Add(before);
+        if (_undo.Count > UndoLimit)
+        {
+            _undo.RemoveAt(0);
+        }
+        _redo.Clear();
+    }
+
+    private void Undo()
+    {
+        if (_undo.Count == 0)
+        {
+            return;
+        }
+        _redo.Add(_state.WorkingSong.DeepClone());
+        var snapshot = _undo[^1];
+        _undo.RemoveAt(_undo.Count - 1);
+        RestoreSnapshot(snapshot);
+    }
+
+    private void Redo()
+    {
+        if (_redo.Count == 0)
+        {
+            return;
+        }
+        _undo.Add(_state.WorkingSong.DeepClone());
+        var snapshot = _redo[^1];
+        _redo.RemoveAt(_redo.Count - 1);
+        RestoreSnapshot(snapshot);
+    }
+
+    private void RestoreSnapshot(Song snapshot)
+    {
+        _state.WorkingSong = snapshot.DeepClone();
+        _state.SelectedNoteIds.Clear();
+        _dragOriginals.Clear();
+        _dragSnapshotTaken = false;
+        _resizeSnapshotTaken = false;
+        _revision++;
+    }
+
+    // --- copy / paste --------------------------------------------------------
+
+    private void CopySelection()
+    {
+        var track = _state.CurrentTrack;
+        var selected = track.Notes
+            .Where(n => _state.SelectedNoteIds.Contains(n.Id))
+            .OrderBy(n => n.Beat)
+            .ToList();
+
+        _clipboard.Clear();
+        if (selected.Count == 0)
+        {
+            _status = "";
+            return;
+        }
+
+        // Clipboard beats are relative to the earliest note, which becomes beat 0.
+        // The earliest note's absolute beat is the fixed reference for staircase paste.
+        _clipboardRefBeat = selected[0].Beat;
+        _pasteCount = 0;
+        foreach (var note in selected)
+        {
+            _clipboard.Add(note with { Beat = note.Beat - _clipboardRefBeat, Id = Guid.NewGuid() });
+        }
+
+        _status = $"Copied {_clipboard.Count} note(s) — Ctrl+V to paste (staircase)";
+    }
+
+    private void CutSelection()
+    {
+        CopySelection();
+        if (_clipboard.Count == 0)
+        {
+            return;
+        }
+
+        PushUndo();
+        var track = _state.CurrentTrack;
+        track.Notes.RemoveAll(n => _state.SelectedNoteIds.Contains(n.Id));
+        _state.SelectedNoteIds.Clear();
+        _status = $"Cut {_clipboard.Count} note(s) — Ctrl+V to paste (staircase)";
+        _revision++;
+    }
+
+    private void PasteClipboard()
+    {
+        if (_clipboard.Count == 0)
+        {
+            return;
+        }
+
+        var track = _state.CurrentTrack;
+        var step = _state.SnapBeats;
+
+        // Staircase: each paste steps one snap right and two semitones down from the
+        // clipboard's fixed reference point. Never rebased on the current selection.
+        _pasteCount++;
+        var beatOffset = _pasteCount * step;
+
+        // Pitch shift is 2 semitones down per step, but once any clipboard note would
+        // drop below the visible range we stop shifting pitch (beats keep stepping).
+        var lowestMidi = _clipboard.Min(n => NoteMidi(n.Pitch));
+        var semitoneOffset = -_pasteCount * 2;
+        if (lowestMidi + semitoneOffset < InstrumentLayout.PitchMinMidi)
+        {
+            semitoneOffset = 0;
+        }
+
+        var occupied = new HashSet<(long Step, int Midi)>();
+        foreach (var note in track.Notes)
+        {
+            occupied.Add((StepIndex(note.Beat, step), NoteMidi(note.Pitch)));
+        }
+
+        // Plan first; colliding notes are skipped individually (not all-or-nothing).
+        var plan = new List<(Guid Id, double Beat, int Midi, double Velocity, double Duration)>();
+        var skipped = 0;
+        foreach (var note in _clipboard)
+        {
+            var beat = Math.Max(0, _clipboardRefBeat + note.Beat + beatOffset);
+            beat = Math.Max(0, Math.Round(beat / step) * step);
+            var midi = Math.Clamp(
+                NoteMidi(note.Pitch) + semitoneOffset,
+                InstrumentLayout.PitchMinMidi,
+                InstrumentLayout.PitchMaxMidi);
+
+            var key = (StepIndex(beat, step), midi);
+            if (occupied.Contains(key))
+            {
+                skipped++;
+                continue;
+            }
+            occupied.Add(key);
+            plan.Add((Guid.NewGuid(), beat, midi, note.Velocity, note.Duration));
+        }
+
+        if (skipped > 0)
+        {
+            Console.WriteLine($"[riffgame] paste skipped {skipped} collision(s)");
+        }
+        if (plan.Count == 0)
+        {
+            return;
+        }
+
+        PushUndo();
+        foreach (var (id, beat, midi, velocity, duration) in plan)
+        {
+            track.Notes.Add(new Note
+            {
+                Id = id,
+                Beat = beat,
+                Pitch = PitchMath.MidiToName(midi),
+                Velocity = velocity,
+                Duration = duration,
+            });
+        }
+
+        _state.SelectedNoteIds.Clear();
+        foreach (var (id, _, _, _, _) in plan)
+        {
+            _state.SelectedNoteIds.Add(id);
+        }
+
+        var firstBeat = plan.Min(p => p.Beat);
+        _status = $"Pasted {plan.Count} note(s) at beat {firstBeat:0.##}"
+            + (skipped > 0 ? $" ({skipped} skipped)" : "");
+        _revision++;
+    }
+
+    // --- duration resize -----------------------------------------------------
+
+    private void ResizeNote(NoteResize resize)
+    {
+        var track = _state.CurrentTrack;
+        if (resize.Index < 0 || resize.Index >= track.Notes.Count)
+        {
+            return;
+        }
+
+        var step = _state.SnapBeats;
+        var duration = Math.Max(step, Math.Round(resize.DurationBeats / step) * step);
+        var note = track.Notes[resize.Index];
+        if (Math.Abs(note.Duration - duration) < 1e-9)
+        {
+            return;
+        }
+
+        // One snapshot per resize gesture (taken on the first actual change).
+        if (!_resizeSnapshotTaken)
+        {
+            PushUndo();
+            _resizeSnapshotTaken = true;
+        }
+
+        track.Notes[resize.Index] = note with { Duration = duration };
+        _revision++;
+    }
+
+    private void ResizeNoteEnd() => _resizeSnapshotTaken = false;
+
+    private void ResizeSelectedNote(int steps)
+    {
+        if (_state.SelectedNoteIds.Count != 1)
+        {
+            return;
+        }
+
+        var track = _state.CurrentTrack;
+        var id = _state.SelectedNoteIds.First();
+        var index = track.Notes.FindIndex(n => n.Id == id);
+        if (index < 0)
+        {
+            return;
+        }
+
+        var step = _state.SnapBeats;
+        var duration = Math.Max(step, track.Notes[index].Duration + steps * step);
+        if (Math.Abs(track.Notes[index].Duration - duration) < 1e-9)
+        {
+            return;
+        }
+
+        PushUndo();
+        track.Notes[index] = track.Notes[index] with { Duration = duration };
+        _revision++;
+    }
+
+    private static long StepIndex(double beat, double step) => (long)Math.Round(beat / step);
+
+    private static int NoteMidi(string pitch) =>
+        NormalizeMidi(PitchMath.TryNameToMidi(pitch, out var m) ? m : 60);
 
     private async Task PlayAsync()
     {
@@ -314,6 +769,15 @@
             }
 
             _state.LoadSong(song);
+            // Loading is not undoable: reset history and transient state.
+            _undo.Clear();
+            _redo.Clear();
+            _dragOriginals.Clear();
+            _clipboard.Clear();
+            _pasteCount = 0;
+            _status = "";
+            _dragSnapshotTaken = false;
+            _resizeSnapshotTaken = false;
             _revision++;
         }
         catch (Exception ex)

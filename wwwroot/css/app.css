@@ -317,6 +317,15 @@ a {
     line-height: 1.2;
 }
 
+.status-msg {
+    font-size: 11px;
+    color: var(--text-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 280px;
+}
+
 .editor-main {
     flex: 1;
     min-height: 0;

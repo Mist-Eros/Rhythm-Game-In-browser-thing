@@ -41,6 +41,9 @@ public sealed class ComposeState
         set => WorkingSong = WorkingSong with { Bpm = value };
     }
 
+    /// <summary>Ids of the currently selected notes (only on the selected track).</summary>
+    public HashSet<Guid> SelectedNoteIds { get; } = [];
+
     public double LengthSeconds => TimingService.BeatsToSeconds(LengthBeats, Bpm);
 
     public Track CurrentTrack =>
@@ -58,9 +61,8 @@ public sealed class ComposeState
             }
         }
 
-        // Normalize every note pitch into the shared piano-roll range. Blank pitches
-        // become C4; out-of-range notes (e.g. an old "C1") are clamped so they land
-        // on a visible row instead of off-grid.
+        // Normalize every note: clamp pitch into the shared piano-roll range (blank -> C4,
+        // out-of-range e.g. an old "C1" -> C2) and ensure a stable Id for selection.
         foreach (var track in song.Tracks)
         {
             for (var i = 0; i < track.Notes.Count; i++)
@@ -68,15 +70,18 @@ public sealed class ComposeState
                 var note = track.Notes[i];
                 var midi = PitchMath.TryNameToMidi(note.Pitch, out var m) ? m : 60;
                 var clamped = Math.Clamp(midi, InstrumentLayout.PitchMinMidi, InstrumentLayout.PitchMaxMidi);
-                var name = PitchMath.MidiToName(clamped);
-                if (!string.Equals(note.Pitch, name, StringComparison.Ordinal))
+                var pitch = PitchMath.MidiToName(clamped);
+                var id = note.Id == Guid.Empty ? Guid.NewGuid() : note.Id;
+
+                if (!string.Equals(note.Pitch, pitch, StringComparison.Ordinal) || id != note.Id)
                 {
-                    track.Notes[i] = note with { Pitch = name };
+                    track.Notes[i] = note with { Pitch = pitch, Id = id };
                 }
             }
         }
 
         WorkingSong = song;
+        SelectedNoteIds.Clear();
 
         if (song.Tracks.All(t => t.Instrument != SelectedInstrument))
         {

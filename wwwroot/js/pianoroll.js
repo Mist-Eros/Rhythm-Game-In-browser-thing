@@ -44,6 +44,8 @@ function normalize(raw) {
       color: read(n.color ?? n.Color, "#00d9ff"),
       selected: read(n.selected ?? n.Selected, false),
       index: read(n.index ?? n.Index, -1),
+      id: read(n.id ?? n.Id, ""),
+      chosen: read(n.chosen ?? n.Chosen, false),
     })),
   };
 }
@@ -66,7 +68,6 @@ function readColors() {
 }
 
 const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-
 function noteName(midi) {
   return NOTE_NAMES[((midi % 12) + 12) % 12] + (Math.floor(midi / 12) - 1);
 }
@@ -78,6 +79,12 @@ function metrics() {
     pixelsPerBeat: config.basePixelsPerBeat * config.timeZoom,
     pixelsPerSemitone: config.basePixelsPerSemitone * config.pitchZoom,
   };
+}
+
+// Positive result = higher pitch, negative = lower. Canvas Y grows downward,
+// but pitch grows upward, so invert the Y difference.
+function canvasYToPitchOffset(startY, currentY, pixelsPerSemitone) {
+  return (startY - currentY) / pixelsPerSemitone;
 }
 
 function snapBeats() {
@@ -250,6 +257,29 @@ function drawGrid(L, scrollLeft, scrollTop, colors) {
   drawNotes(L, scrollLeft, scrollTop);
   drawPlayhead(L, scrollLeft, colors);
   drawDebug(L, scrollLeft, scrollTop, colors);
+  drawSelectionBand(colors);
+}
+
+// Rubber-band rectangle, drawn in viewport (canvas) space since the canvas is pinned.
+function drawSelectionBand(colors) {
+  const band = active.band;
+  if (!band) {
+    return;
+  }
+  const ctx = active.gridCtx;
+  const x = Math.min(band.x0, band.x1);
+  const y = Math.min(band.y0, band.y1);
+  const w = Math.abs(band.x1 - band.x0);
+  const h = Math.abs(band.y1 - band.y0);
+
+  ctx.save();
+  ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+  ctx.fillRect(x, y, w, h);
+  ctx.setLineDash([4, 3]);
+  ctx.strokeStyle = colors.accent;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+  ctx.restore();
 }
 
 function noteRect(note, L, scrollLeft, scrollTop) {
@@ -291,6 +321,17 @@ function drawNotes(L, scrollLeft, scrollTop) {
     ctx.fillStyle = note.color;
     roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 3);
     ctx.fill();
+
+    if (note.chosen) {
+      // White ring keeps the instrument color readable while marking selection.
+      ctx.globalAlpha = 1;
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = "transparent";
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2;
+      roundRect(ctx, rect.x - 1, rect.y - 1, rect.w + 2, rect.h + 2, 4);
+      ctx.stroke();
+    }
   }
 
   ctx.restore();
@@ -473,6 +514,39 @@ function hitTest(x, y, L, scrollLeft, scrollTop) {
   return -1;
 }
 
+function noteByIndex(index) {
+  return active.config.notes.find((n) => n.selected && n.index === index) || null;
+}
+
+const RESIZE_EDGE_PX = 6;
+
+// True when the cursor is over the right edge of a note (duration resize hotspot).
+function isNearRightEdge(x, rect) {
+  return x >= rect.x + rect.w - RESIZE_EDGE_PX && x <= rect.x + rect.w + 2;
+}
+
+// Ids of selected-track notes whose rect overlaps the rubber band (partial counts).
+function notesInBand(band, L) {
+  const scrollLeft = active.scroller.scrollLeft;
+  const scrollTop = active.scroller.scrollTop;
+  const x0 = Math.min(band.x0, band.x1);
+  const y0 = Math.min(band.y0, band.y1);
+  const x1 = Math.max(band.x0, band.x1);
+  const y1 = Math.max(band.y0, band.y1);
+
+  const ids = [];
+  for (const note of active.config.notes) {
+    if (!note.selected) {
+      continue;
+    }
+    const r = noteRect(note, L, scrollLeft, scrollTop);
+    if (r.x < x1 && r.x + r.w > x0 && r.y < y1 && r.y + r.h > y0) {
+      ids.push(note.id);
+    }
+  }
+  return ids;
+}
+
 function onPointerDown(event) {
   if (!active) {
     return;
@@ -499,25 +573,64 @@ function onPointerDown(event) {
   event.preventDefault();
 
   const index = hitTest(x, y, L, scrollLeft, scrollTop);
+
+  // Right-edge hit starts a duration resize for that one note (before selection logic).
+  if (index >= 0 && !event.shiftKey) {
+    const note = noteByIndex(index);
+    const rect = noteRect(note, L, scrollLeft, scrollTop);
+    if (isNearRightEdge(x, rect)) {
+      active.drag = {
+        kind: "resize",
+        pointerId: event.pointerId,
+        index,
+        noteBeat: note.beat,
+      };
+      canvas.setPointerCapture(event.pointerId);
+      canvas.style.cursor = "col-resize";
+      return;
+    }
+  }
+
+  // Shift-click toggles membership; shift on empty space does nothing.
+  if (event.shiftKey) {
+    if (index >= 0) {
+      const note = noteByIndex(index);
+      if (note) {
+        invoke("OnToggleNote", note.id);
+      }
+    }
+    return;
+  }
+
   if (index >= 0) {
-    const note = active.config.notes.find((n) => n.selected && n.index === index);
-    const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+    const note = noteByIndex(index);
+    const { pixelsPerBeat } = metrics();
+    const snap = snapBeats();
+
+    // Clicking an unselected note selects only it; clicking a selected note keeps
+    // the selection. Either way, begin dragging the whole selection.
+    if (!note.chosen) {
+      invoke("OnSelectNotes", [note.id]);
+    }
     active.drag = {
-      index,
+      kind: "move",
       pointerId: event.pointerId,
-      offsetBeats: (x + scrollLeft) / pixelsPerBeat - note.beat,
-      offsetRows: (y + scrollTop) / pixelsPerSemitone - (active.config.pitchMax - note.midi),
+      startBeat: Math.floor((x + scrollLeft) / pixelsPerBeat / snap) * snap,
+      startY: y,
     };
+    invoke("OnSelectionDragStart");
     canvas.setPointerCapture(event.pointerId);
     canvas.style.cursor = "move";
     return;
   }
 
-  if (insideGrid(x, y, L)) {
-    const { pixelsPerBeat, pixelsPerSemitone } = metrics();
-    const cell = pixelsToCell(x + scrollLeft, y + scrollTop, pixelsPerBeat, pixelsPerSemitone, snapBeats());
-    invoke("OnPlaceNote", cell.beat, clampMidi(midiForSemitone(cell.semitoneIndex)));
-  }
+  // Empty space: clear selection and start a rubber band. A click with no movement
+  // is treated as "place a note" on pointerup (see onPointerUp).
+  invoke("OnClearSelection");
+  active.band = { x0: x, y0: y, x1: x, y1: y };
+  active.drag = { kind: "band", pointerId: event.pointerId, x0: x, y0: y, x1: x, y1: y };
+  canvas.setPointerCapture(event.pointerId);
+  schedule();
 }
 
 function onPointerMove(event) {
@@ -532,20 +645,46 @@ function onPointerMove(event) {
   const scrollTop = active.scroller.scrollTop;
 
   if (active.drag && event.pointerId === active.drag.pointerId) {
-    const { pixelsPerBeat, pixelsPerSemitone } = metrics();
-    const snap = snapBeats();
-    const rawBeat = (x + scrollLeft) / pixelsPerBeat - active.drag.offsetBeats;
-    const maxBeat = Math.max(0, active.config.lengthBeats - snap);
-    const beat = Math.max(0, Math.min(maxBeat, Math.floor(rawBeat / snap) * snap));
-    const rawRow = (y + scrollTop) / pixelsPerSemitone - active.drag.offsetRows;
-    const midi = clampMidi(midiForSemitone(Math.round(rawRow)));
-    invoke("OnMoveNote", active.drag.index, beat, midi);
-    schedule();
-    return;
+    if (active.drag.kind === "band") {
+      active.drag.x1 = x;
+      active.drag.y1 = y;
+      active.band = { x0: active.drag.x0, y0: active.drag.y0, x1: x, y1: y };
+      schedule();
+      return;
+    }
+
+    if (active.drag.kind === "move") {
+      const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+      const snap = snapBeats();
+      const curBeat = Math.floor((x + scrollLeft) / pixelsPerBeat / snap) * snap;
+      const beatSteps = Math.round((curBeat - active.drag.startBeat) / snap);
+      // canvasYToPitchOffset: up on screen => positive => higher pitch.
+      const rowSteps = Math.round(
+        canvasYToPitchOffset(active.drag.startY, y, pixelsPerSemitone));
+      invoke("OnSelectionDragUpdate", beatSteps, rowSteps);
+      schedule();
+      return;
+    }
+
+    if (active.drag.kind === "resize") {
+      const { pixelsPerBeat } = metrics();
+      const snap = snapBeats();
+      const cursorBeat = (x + scrollLeft) / pixelsPerBeat;
+      const duration = Math.max(1, Math.round((cursorBeat - active.drag.noteBeat) / snap)) * snap;
+      invoke("OnResizeNote", active.drag.index, duration);
+      schedule();
+      return;
+    }
   }
 
   const index = hitTest(x, y, L, scrollLeft, scrollTop);
-  canvas.style.cursor = index >= 0 ? "move" : "crosshair";
+  if (index >= 0) {
+    const note = noteByIndex(index);
+    const rect = noteRect(note, L, scrollLeft, scrollTop);
+    canvas.style.cursor = isNearRightEdge(x, rect) ? "col-resize" : "move";
+  } else {
+    canvas.style.cursor = "crosshair";
+  }
   if (active.config.debug) {
     schedule();
   }
@@ -555,11 +694,41 @@ function onPointerUp(event) {
   if (!active || !active.drag || event.pointerId !== active.drag.pointerId) {
     return;
   }
+  const drag = active.drag;
   if (active.gridCanvas.hasPointerCapture && active.gridCanvas.hasPointerCapture(event.pointerId)) {
     active.gridCanvas.releasePointerCapture(event.pointerId);
   }
   active.drag = null;
+  active.band = null;
   active.gridCanvas.style.cursor = "crosshair";
+
+  if (drag.kind === "move") {
+    invoke("OnSelectionDragEnd");
+    return;
+  }
+
+  if (drag.kind === "resize") {
+    invoke("OnResizeEnd");
+    return;
+  }
+
+  if (drag.kind === "band") {
+    const moved = Math.abs(drag.x1 - drag.x0) > 3 || Math.abs(drag.y1 - drag.y0) > 3;
+    if (moved) {
+      invoke("OnSelectNotes", notesInBand(drag, computeLayout()));
+    } else {
+      // Plain click on empty grid: place a note for the selected instrument.
+      const { pixelsPerBeat, pixelsPerSemitone } = metrics();
+      const cell = pixelsToCell(
+        drag.x0 + active.scroller.scrollLeft,
+        drag.y0 + active.scroller.scrollTop,
+        pixelsPerBeat,
+        pixelsPerSemitone,
+        snapBeats());
+      invoke("OnPlaceNote", cell.beat, clampMidi(midiForSemitone(cell.semitoneIndex)));
+    }
+    schedule();
+  }
 }
 
 function teardown() {
@@ -602,6 +771,7 @@ export function init(root, rawConfig, dotNet) {
     dirty: false,
     raf: 0,
     drag: null,
+    band: null,
     lastPointer: null,
     cleanup: null,
   };
@@ -625,7 +795,62 @@ export function init(root, rawConfig, dotNet) {
   };
 
   const onKey = (event) => {
+    // Never hijack keys while typing in a form control.
+    const target = event.target;
+    const tag = target && target.tagName ? target.tagName : "";
+    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" ||
+        (target && target.isContentEditable)) {
+      return;
+    }
+
+    if (event.key === "Escape") {
+      invoke("OnClearSelection");
+      event.preventDefault();
+      return;
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      const key = event.key.toLowerCase();
+      if (key === "z" && !event.shiftKey) {
+        invoke("OnUndo");
+      } else if ((key === "z" && event.shiftKey) || key === "y") {
+        invoke("OnRedo");
+      } else if (key === "c") {
+        invoke("OnCopy");
+      } else if (key === "x") {
+        invoke("OnCut");
+      } else if (key === "v") {
+        invoke("OnPaste");
+      } else if (key === "a") {
+        invoke("OnSelectAll");
+      } else {
+        return;
+      }
+      event.preventDefault();
+      return;
+    }
+
     switch (event.key) {
+      // , / . shorten / lengthen the single selected note by one snap step.
+      case ",":
+        invoke("OnResizeSelected", -1);
+        break;
+      case ".":
+        invoke("OnResizeSelected", 1);
+        break;
+      // Arrow keys nudge the selection: left/right one snap step, up/down a semitone.
+      case "ArrowLeft":
+        invoke("OnNudge", -1, 0);
+        break;
+      case "ArrowRight":
+        invoke("OnNudge", 1, 0);
+        break;
+      case "ArrowUp":
+        invoke("OnNudge", 0, 1);
+        break;
+      case "ArrowDown":
+        invoke("OnNudge", 0, -1);
+        break;
       case "-":
       case "_":
         invoke("OnZoomStep", "time", -1);

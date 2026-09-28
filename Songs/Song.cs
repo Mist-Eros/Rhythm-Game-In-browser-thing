@@ -14,4 +14,23 @@ public sealed record Song
     public double OffsetMs { get; init; }
 
     public List<Track> Tracks { get; init; } = [];
+
+    /// <summary>
+    /// Deep copy with independent track/note lists, used for undo snapshots.
+    /// Note ids are preserved so selection semantics stay stable across undo/redo.
+    /// </summary>
+    public Song DeepClone() => new()
+    {
+        Title = Title,
+        Bpm = Bpm,
+        BeatsPerBar = BeatsPerBar,
+        OffsetMs = OffsetMs,
+        Tracks = Tracks
+            .Select(track => new Track
+            {
+                Instrument = track.Instrument,
+                Notes = track.Notes.Select(note => note with { }).ToList(),
+            })
+            .ToList(),
+    };
 }

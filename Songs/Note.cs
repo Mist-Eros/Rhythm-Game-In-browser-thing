@@ -3,6 +3,9 @@ namespace RiffGame.Songs;
 /// <summary>One note event in beats (song-relative).</summary>
 public sealed record Note
 {
+    /// <summary>Stable identity, used for selection. Regenerated for notes lacking an Id on load.</summary>
+    public Guid Id { get; init; } = Guid.NewGuid();
+
     /// <summary>Position from song start, in beats.</summary>
     public double Beat { get; init; }
 
