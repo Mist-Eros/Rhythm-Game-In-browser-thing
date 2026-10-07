@@ -1,0 +1,147 @@
+@page "/library"
+@using RiffGame.Services
+@inject SongLibrary LibraryService
+@inject NavigationManager Navigation
+@inject LibraryAuth _auth
+
+<PageTitle>Library · RiffGame</PageTitle>
+
+<div class="library-page">
+    <div class="library-toolbar">
+        <h1 class="library-title">Library</h1>
+        <button class="btn btn-accent" @onclick="NewSong">+ New song</button>
+        <span class="spacer"></span>
+        <span class="text-dim">@_songs.Count song(s)</span>
+    </div>
+
+    @if (_loading)
+    {
+        <div class="library-empty text-dim">Loading…</div>
+    }
+    else if (_songs.Count == 0)
+    {
+        <div class="library-empty text-dim">
+            No songs yet — click New Song to start composing.
+        </div>
+    }
+    else
+    {
+        <div class="library-grid">
+            @foreach (var song in _songs)
+            {
+                var bars = song.BeatsPerBar > 0
+                    ? (int)Math.Ceiling(song.LengthBeats / song.BeatsPerBar)
+                    : 0;
+                var title = string.IsNullOrWhiteSpace(song.Title) ? "Untitled" : song.Title;
+                <div class="song-card">
+                    <a class="song-card-title song-card-link" href="library/song/@Uri.EscapeDataString(song.Id)">@title</a>
+                    <div class="song-card-meta">
+                        <span>@song.Bpm.ToString("0") BPM</span>
+                        <span>@bars bar(s)</span>
+                    </div>
+                    <div class="song-card-updated text-dim">@Relative(song.UpdatedAt)</div>
+                    <div class="song-card-actions">
+                        <button class="btn btn-accent" @onclick="() => OpenSong(song.Id)">Open</button>
+                        <button class="btn" @onclick="() => LoadSong(song.Id)">Edit notes</button>
+                        @if (_confirmId == song.Id)
+                        {
+                            <button class="btn btn-danger" @onclick="() => ConfirmDeleteAsync(song.Id)">Sure?</button>
+                        }
+                        else
+                        {
+                            <button class="btn" @onclick="() => RequestDelete(song.Id)">Delete</button>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+    }
+
+    <PasswordPrompt Visible="_promptOpen" OnUnlocked="OnPromptUnlocked" OnCancel="OnPromptCancelled" />
+</div>
+
+@code {
+    private bool _loading = true;
+    private List<SongSummary> _songs = [];
+    private string? _confirmId;
+    private bool _promptOpen;
+    private string? _pendingDeleteId;
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        _loading = true;
+        _songs = await LibraryService.ListAsync();
+        _loading = false;
+    }
+
+    private void NewSong() => Navigation.NavigateTo("compose");
+
+    private void LoadSong(string id) => Navigation.NavigateTo($"compose?load={Uri.EscapeDataString(id)}");
+
+    private void OpenSong(string id) => Navigation.NavigateTo($"library/song/{Uri.EscapeDataString(id)}");
+
+    private void RequestDelete(string id) => _confirmId = id;
+
+    private async Task ConfirmDeleteAsync(string id)
+    {
+        _confirmId = null;
+
+        // Deleting mutates the library, so it is password-gated for this session.
+        if (!_auth.IsUnlocked)
+        {
+            _pendingDeleteId = id;
+            _promptOpen = true;
+            return;
+        }
+
+        await DoDeleteAsync(id);
+    }
+
+    private async Task DoDeleteAsync(string id)
+    {
+        await LibraryService.DeleteAsync(id);
+        await ReloadAsync();
+    }
+
+    private async Task OnPromptUnlocked()
+    {
+        _promptOpen = false;
+        var id = _pendingDeleteId;
+        _pendingDeleteId = null;
+        if (id is not null)
+        {
+            await DoDeleteAsync(id);
+        }
+    }
+
+    private void OnPromptCancelled()
+    {
+        _promptOpen = false;
+        _pendingDeleteId = null;
+    }
+
+    private static string Relative(long updatedAtMs)
+    {
+        var time = DateTimeOffset.FromUnixTimeMilliseconds(updatedAtMs);
+        var delta = DateTimeOffset.UtcNow - time;
+        if (delta.TotalSeconds < 60)
+        {
+            return "just now";
+        }
+        if (delta.TotalMinutes < 60)
+        {
+            return $"{(int)delta.TotalMinutes} min ago";
+        }
+        if (delta.TotalHours < 24)
+        {
+            return $"{(int)delta.TotalHours} hr ago";
+        }
+        if (delta.TotalDays < 30)
+        {
+            return $"{(int)delta.TotalDays} day ago";
+        }
+        return time.ToLocalTime().ToString("yyyy-MM-dd");
+    }
+}

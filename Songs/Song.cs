@@ -6,6 +6,9 @@ namespace RiffGame.Songs;
 /// </summary>
 public sealed record Song
 {
+    /// <summary>Stable library identity. A fresh GUID for new songs; preserved on load/save.</summary>
+    public Guid Id { get; init; } = Guid.NewGuid();
+
     public required string Title { get; init; }
     public double Bpm { get; init; } = 120;
     public int BeatsPerBar { get; init; } = 4;
@@ -21,6 +24,7 @@ public sealed record Song
     /// </summary>
     public Song DeepClone() => new()
     {
+        Id = Id,
         Title = Title,
         Bpm = Bpm,
         BeatsPerBar = BeatsPerBar,

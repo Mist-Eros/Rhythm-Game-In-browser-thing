@@ -1,0 +1,790 @@
+@page "/chart-editor"
+@using Microsoft.AspNetCore.Components.Forms
+@using Microsoft.AspNetCore.Components.Web
+@using RiffGame.Charts
+@using RiffGame.Game
+@using RiffGame.Interop
+@using RiffGame.Services
+@using RiffGame.Songs
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+@inject NavigationManager Navigation
+@inject SongLibrary Songs
+@inject ChartLibrary Charts
+@inject DownloadInterop Downloader
+@inject LibraryAuth _auth
+
+<PageTitle>Chart editor · RiffGame</PageTitle>
+
+<div class="chart-editor">
+    @* Row 1: song / chart metadata + file actions. *@
+    <div class="chart-topbar">
+        <span class="chart-song-title">@(_song?.Title ?? "—")</span>
+        <input class="chart-name" placeholder="Chart name" @bind="_title" />
+        <input class="chart-difficulty" placeholder="Difficulty" @bind="_difficulty" />
+        <span class="spacer"></span>
+        <button class="btn btn-accent" @onclick="SaveChartAsync">Save</button>
+        <button class="btn" @onclick="DownloadChartAsync">Download</button>
+        <label class="btn">
+            Load
+            <InputFile OnChange="LoadChartAsync" accept=".json" style="display:none" />
+        </label>
+        <a class="btn" href="@BackToSongHref">Back to Song</a>
+    </div>
+
+    @* Row 2: transport / snap / zoom. *@
+    <div class="chart-toolbar">
+        <span class="tool-label">Snap</span>
+        @foreach (var s in SnapChoices)
+        {
+            var choice = s;
+            <button class="btn btn-mini @(_snapSubdiv == choice ? "active" : "")"
+                    @onclick="() => _snapSubdiv = choice">1/@choice</button>
+        }
+
+        <span class="tool-sep"></span>
+
+        <span class="tool-label">Zoom Time</span>
+        <button class="btn btn-mini" @onclick="() => ZoomBy(-1)">−</button>
+        <span class="zoom-value">@_zoom.ToString("0.00")x</span>
+        <button class="btn btn-mini" @onclick="() => ZoomBy(1)">+</button>
+
+        <span class="tool-sep"></span>
+
+        <button class="btn btn-accent" @onclick="PlayAsync" disabled="@(_song is null)">▶ Play</button>
+        <button class="btn" @onclick="StopAsync">■ Stop</button>
+
+        <button class="btn btn-mini" @onclick="() => RotateSelected(true)" disabled="@(!SelectedIsDirectional)"
+                title="Rotate counter-clockwise (Shift+R)">⟲</button>
+        <button class="btn btn-mini" @onclick="() => RotateSelected(false)" disabled="@(!SelectedIsDirectional)"
+                title="Rotate clockwise (R)">⟳</button>
+
+        <span class="tool-sep"></span>
+        <span class="status-msg">@_status</span>
+    </div>
+
+    @if (!string.IsNullOrEmpty(_error))
+    {
+        <div class="compose-error">@_error</div>
+    }
+
+    @* Single horizontal scroller; ruler + lanes + reference stack vertically inside. *@
+    <div class="chart-timeline-scroll">
+        @if (_song is null)
+        {
+            <div class="library-empty text-dim">Pick a song to start charting.</div>
+        }
+        else
+        {
+            <div class="chart-content" style="width:@(ContentWidth)px">
+                <div class="chart-ruler">
+                    @foreach (var bar in RulerBars())
+                    {
+                        <span class="ruler-bar-label" style="left:@(bar.X)px">@bar.Number</span>
+                    }
+                    @foreach (var x in RulerBeats())
+                    {
+                        <span class="ruler-beat-tick" style="left:@(x)px"></span>
+                    }
+                </div>
+
+                <div class="chart-lanes"
+                     @onpointermove="OnPointerMove" @onpointerup="OnPointerUp" @onpointerleave="OnPointerUp">
+                    @for (var lane = 1; lane <= 4; lane++)
+                    {
+                        var l = lane;
+                        <div class="chart-lane @(lane % 2 == 0 ? "alt" : "")"
+                             @onclick="e => OnLaneClick(e, l)">
+                            <span class="lane-number">@lane</span>
+
+                            @foreach (var item in _triggers.Select((t, i) => (Trigger: t, Index: i)).Where(x => x.Trigger.Lane == l))
+                            {
+                                var t = item.Trigger;
+                                var index = item.Index;
+                                <div class="chart-trigger @TypeClass(t.Type) @(_selectedIndex == index ? "selected" : "")"
+                                     style="left:@(t.Beat * Ppb)px; width:@(TriggerWidth(t))px"
+                                     title="@t.Type"
+                                     @onclick="e => OnTriggerClick(e, index)"
+                                     @onclick:stopPropagation="true"
+                                     @oncontextmenu="e => DeleteTrigger(index)"
+                                     @oncontextmenu:preventDefault="true"
+                                     @oncontextmenu:stopPropagation="true"
+                                     @onpointerdown="e => BeginDrag(e, index)">
+                                    @if (t.Type == ChartTriggerTypes.Tap)
+                                    {
+                                        <span class="glyph-tap"></span>
+                                    }
+                                    else if (t.Type == ChartTriggerTypes.Hold)
+                                    {
+                                        <span class="glyph-hold"></span>
+                                        <span class="chart-resize-handle"
+                                              @onpointerdown:stopPropagation="true"
+                                              @onpointerdown="e => BeginResize(e, index)"
+                                              @onclick="Noop"
+                                              @onclick:stopPropagation="true"></span>
+                                    }
+                                    else
+                                    {
+                                        <span class="glyph-dir">@Glyph(t.Type)</span>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+
+                    @foreach (var line in GridLines())
+                    {
+                        <span class="chart-gridline @line.Kind" style="left:@(line.X)px"></span>
+                    }
+
+                    @if (_radialOpen)
+                    {
+                        <div class="radial" style="left:@(_radialBeat * Ppb)px; top:@RadialTopPercent %"
+                             @onclick="Noop" @onclick:stopPropagation="true">
+                            <button class="radial-btn" @onclick="() => ApplyTypeAsync(ChartTriggerTypes.Tap)">Tap</button>
+                            <div class="radial-row">
+                                <button class="radial-btn" @onclick="() => ApplyTypeAsync(ChartTriggerTypes.Hold)">Hold</button>
+                                <button class="radial-btn" @onclick="() => ApplyTypeAsync(ChartTriggerTypes.Left)">Dir</button>
+                            </div>
+                        </div>
+                    }
+                </div>
+
+                <div class="chart-divider"><span>Song Reference</span></div>
+
+                <div class="chart-reference">
+                    @foreach (var tick in ReferenceTicks())
+                    {
+                        <span class="ref-tick @(tick.Strong ? "strong" : "")"
+                              style="left:@(tick.X)px; height:@(tick.HeightPct)%"></span>
+                    }
+                </div>
+
+                <div class="chart-playhead" style="left:@(_currentBeat * Ppb)px"></div>
+            </div>
+        }
+    </div>
+
+    <PasswordPrompt Visible="_promptOpen" OnUnlocked="OnPromptUnlocked" OnCancel="OnPromptCancelled" />
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "songId")] public string? QuerySongId { get; set; }
+    [SupplyParameterFromQuery(Name = "chartId")] public string? QueryChartId { get; set; }
+
+    // Fewer pixels per beat than the compose editor so the whole song fits at a glance.
+    private const int BasePixelsPerBeat = 64;
+    private static readonly int[] SnapChoices = [8, 16, 32, 64, 128];
+
+    private AudioInterop _audio = default!;
+    private SongPlayer? _player;
+
+    private List<SongSummary> _songs = [];
+    private Song? _song;
+
+    private string _chartId = "";
+    private string _songId = "";
+    private string _title = "Untitled";
+    private string _difficulty = "Normal";
+    private List<ChartTrigger> _triggers = [];
+
+    private int _snapSubdiv = 128;
+    private double _zoom = 0.5;
+    private double _lengthBeats = 32;
+
+    private int _selectedIndex = -1;
+    private bool _radialOpen;
+    private double _radialBeat;
+    private int _radialLane = 1;
+    private int _radialExisting = -1;
+
+    private int _dragIndex = -1;
+    private double _dragStartX;
+    private double _dragOriginalBeat;
+    private bool _dragMoved;
+    private bool _suppressClick;
+
+    private int _resizeIndex = -1;
+    private double _resizeStartX;
+    private double _resizeOriginalDuration;
+
+    private KeyboardInterop? _keyboard;
+    private DotNetObjectReference<ChartKeyCallbacks>? _keyRef;
+    private string _status = "";
+    private int _statusVersion;
+    private string _error = "";
+
+    private bool _promptOpen;
+    private bool _pendingSave;
+    private bool _isPlaying;
+    private double _currentBeat;
+
+    private System.Timers.Timer? _pollTimer;
+
+    private double SnapBeats => 1.0 / _snapSubdiv;
+    private double Ppb => BasePixelsPerBeat * _zoom;
+    private double ContentWidth => Math.Max(400, _lengthBeats * Ppb);
+    private int BeatsPerBar => _song?.BeatsPerBar is > 0 ? _song.BeatsPerBar : 4;
+    private int TotalBeats => (int)Math.Ceiling(_lengthBeats);
+    private int BarsCount => (int)Math.Ceiling((double)_lengthBeats / BeatsPerBar);
+    // Sub-beat grid lines are only drawn when they'd be at least a few px apart.
+    private bool ShowSubLines => Ppb / _snapSubdiv >= 4;
+    private bool SelectedIsDirectional =>
+        _selectedIndex >= 0 && _selectedIndex < _triggers.Count &&
+        ChartTriggerTypes.IsDirectional(_triggers[_selectedIndex].Type);
+    private string RadialTopPercent => (((_radialLane - 0.5) / 4.0) * 100).ToString("0.###");
+
+    private string BackToSongHref =>
+        string.IsNullOrEmpty(_songId) ? "library" : $"library/song/{Uri.EscapeDataString(_songId)}";
+
+    protected override async Task OnInitializedAsync()
+    {
+        _audio = new AudioInterop(JS, Navigation);
+        _songs = await Songs.ListAsync();
+
+        if (!string.IsNullOrEmpty(QueryChartId))
+        {
+            var chart = await Charts.LoadAsync(QueryChartId);
+            if (chart is not null)
+            {
+                _chartId = chart.Id.ToString();
+                _songId = chart.SongId;
+                _title = chart.Title;
+                _difficulty = chart.Difficulty;
+                _triggers = chart.Triggers.ToList();
+            }
+        }
+
+        if (string.IsNullOrEmpty(_songId))
+        {
+            _songId = QuerySongId ?? _songs.FirstOrDefault()?.Id ?? "";
+        }
+
+        await LoadSongAsync();
+
+        _pollTimer = new System.Timers.Timer(33) { AutoReset = true };
+        _pollTimer.Elapsed += async (_, _) => await PollAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            // Window-level shortcuts (R to rotate, Delete, Escape) so they work
+            // regardless of which element has focus.
+            _keyboard = new KeyboardInterop(JS, Navigation);
+            _keyRef = DotNetObjectReference.Create(new ChartKeyCallbacks(OnGlobalKey));
+            await _keyboard.AttachAsync(_keyRef);
+        }
+    }
+
+    private async Task LoadSongAsync()
+    {
+        if (string.IsNullOrEmpty(_songId))
+        {
+            _song = null;
+            return;
+        }
+
+        _song = await Songs.LoadAsync(_songId);
+
+        var maxEnd = 0.0;
+        if (_song is not null)
+        {
+            foreach (var track in _song.Tracks)
+            {
+                foreach (var note in track.Notes)
+                {
+                    var end = note.Beat + note.Duration;
+                    if (end > maxEnd)
+                    {
+                        maxEnd = end;
+                    }
+                }
+            }
+        }
+        foreach (var trigger in _triggers)
+        {
+            var end = trigger.Beat + (trigger.DurationBeats ?? 0);
+            if (end > maxEnd)
+            {
+                maxEnd = end;
+            }
+        }
+
+        _lengthBeats = Math.Max(32, Math.Ceiling(maxEnd) + 4);
+    }
+
+    // --- ruler / grid / reference helpers -----------------------------------
+
+    private IEnumerable<(double X, int Number)> RulerBars()
+    {
+        for (var bar = 0; bar <= BarsCount; bar++)
+        {
+            yield return (bar * BeatsPerBar * Ppb, bar + 1);
+        }
+    }
+
+    private IEnumerable<double> RulerBeats()
+    {
+        for (var beat = 1; beat <= TotalBeats; beat++)
+        {
+            yield return beat * Ppb;
+        }
+    }
+
+    private IEnumerable<(double X, string Kind)> GridLines()
+    {
+        var stepsPerBeat = _snapSubdiv;
+        var stepsPerBar = stepsPerBeat * BeatsPerBar;
+        var totalSteps = Math.Max(1, (int)Math.Round(_lengthBeats * _snapSubdiv));
+        var stepWidth = Ppb / _snapSubdiv;
+        var showSub = ShowSubLines;
+
+        for (var i = 0; i <= totalSteps; i++)
+        {
+            var isBar = i % stepsPerBar == 0;
+            var isBeat = i % stepsPerBeat == 0;
+            if (!isBar && !isBeat && !showSub)
+            {
+                continue;
+            }
+            yield return (i * stepWidth, isBar ? "bar" : isBeat ? "beat" : "sub");
+        }
+    }
+
+    private IEnumerable<(double X, bool Strong, int HeightPct)> ReferenceTicks()
+    {
+        if (_song is null)
+        {
+            yield break;
+        }
+
+        // Combine all instruments; count notes per beat so dense moments read brighter/taller.
+        var counts = new Dictionary<double, int>();
+        foreach (var track in _song.Tracks)
+        {
+            foreach (var note in track.Notes)
+            {
+                var beat = Math.Round(note.Beat, 6);
+                counts[beat] = counts.TryGetValue(beat, out var c) ? c + 1 : 1;
+            }
+        }
+
+        foreach (var pair in counts.OrderBy(p => p.Key))
+        {
+            var strong = pair.Value > 1;
+            yield return (pair.Key * Ppb, strong, strong ? 85 : 55);
+        }
+    }
+
+    // --- interaction ---------------------------------------------------------
+
+    private double Snap(double rawBeat)
+    {
+        var snap = SnapBeats;
+        var max = Math.Max(0, _lengthBeats - snap);
+        return Math.Max(0, Math.Min(max, Math.Round(rawBeat / snap) * snap));
+    }
+
+    private int TriggerAt(double beat, int lane)
+    {
+        for (var i = 0; i < _triggers.Count; i++)
+        {
+            if (_triggers[i].Lane == lane && Math.Abs(_triggers[i].Beat - beat) < 1e-6)
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private void OnLaneClick(MouseEventArgs e, int lane)
+    {
+        _selectedIndex = -1;
+
+        if (_radialOpen)
+        {
+            CloseRadial();
+            return;
+        }
+
+        var beat = Snap(e.OffsetX / Ppb);
+        var existing = TriggerAt(beat, lane);
+        _radialBeat = existing >= 0 ? _triggers[existing].Beat : beat;
+        _radialLane = lane;
+        _radialExisting = existing;
+        _radialOpen = true;
+    }
+
+    private void OnTriggerClick(MouseEventArgs e, int index)
+    {
+        if (_suppressClick)
+        {
+            _suppressClick = false;
+            return;
+        }
+        _selectedIndex = index;
+        _radialBeat = _triggers[index].Beat;
+        _radialLane = _triggers[index].Lane;
+        _radialExisting = index;
+        _radialOpen = true;
+    }
+
+    private async Task ApplyTypeAsync(string type)
+    {
+        if (_radialExisting >= 0 && _radialExisting < _triggers.Count)
+        {
+            var t = _triggers[_radialExisting];
+            _triggers[_radialExisting] = t with
+            {
+                Type = type,
+                DurationBeats = type == ChartTriggerTypes.Hold ? (t.DurationBeats ?? SnapBeats) : null,
+            };
+            _selectedIndex = _radialExisting;
+        }
+        else
+        {
+            _triggers.Add(new ChartTrigger
+            {
+                Beat = _radialBeat,
+                Lane = _radialLane,
+                Type = type,
+                DurationBeats = type == ChartTriggerTypes.Hold ? SnapBeats : null,
+            });
+            _selectedIndex = _triggers.Count - 1;
+        }
+
+        CloseRadial();
+        await Task.CompletedTask;
+    }
+
+    private void CloseRadial()
+    {
+        _radialOpen = false;
+        _radialExisting = -1;
+    }
+
+    private void DeleteTrigger(int index)
+    {
+        if (index < 0 || index >= _triggers.Count)
+        {
+            return;
+        }
+        _triggers.RemoveAt(index);
+        _selectedIndex = -1;
+        CloseRadial();
+    }
+
+    private void RotateSelected(bool counterClockwise)
+    {
+        if (!SelectedIsDirectional)
+        {
+            return;
+        }
+        var t = _triggers[_selectedIndex];
+        _triggers[_selectedIndex] = t with { Type = ChartTriggerTypes.Rotate(t.Type, counterClockwise) };
+    }
+
+    private void BeginDrag(PointerEventArgs e, int index)
+    {
+        _selectedIndex = index;
+        _dragIndex = index;
+        _dragStartX = e.ClientX;
+        _dragOriginalBeat = _triggers[index].Beat;
+        _dragMoved = false;
+    }
+
+    private void BeginResize(PointerEventArgs e, int index)
+    {
+        _resizeIndex = index;
+        _resizeStartX = e.ClientX;
+        _resizeOriginalDuration = _triggers[index].DurationBeats ?? SnapBeats;
+    }
+
+    private void OnPointerMove(PointerEventArgs e)
+    {
+        if (_dragIndex >= 0 && _dragIndex < _triggers.Count)
+        {
+            var dx = e.ClientX - _dragStartX;
+            if (Math.Abs(dx) > 3)
+            {
+                _dragMoved = true;
+            }
+            var t = _triggers[_dragIndex];
+            var beat = Snap(_dragOriginalBeat + dx / Ppb);
+            if (Math.Abs(beat - t.Beat) > 1e-9)
+            {
+                var collision = TriggerAt(beat, t.Lane);
+                if (collision < 0 || collision == _dragIndex)
+                {
+                    _triggers[_dragIndex] = t with { Beat = beat };
+                    _radialBeat = beat;
+                }
+                else
+                {
+                    _status = "Already a trigger there";
+                }
+            }
+            return;
+        }
+
+        if (_resizeIndex >= 0 && _resizeIndex < _triggers.Count)
+        {
+            var dx = e.ClientX - _resizeStartX;
+            var raw = _resizeOriginalDuration + dx / Ppb;
+            var snap = SnapBeats;
+            var duration = Math.Max(snap, Math.Round(raw / snap) * snap);
+            var t = _triggers[_resizeIndex];
+            _triggers[_resizeIndex] = t with { DurationBeats = duration };
+        }
+    }
+
+    private void OnPointerUp(PointerEventArgs e)
+    {
+        if (_dragIndex >= 0)
+        {
+            if (_dragMoved)
+            {
+                _suppressClick = true;
+                _ = ClearSuppressClickAsync();
+            }
+            _dragIndex = -1;
+        }
+        _resizeIndex = -1;
+    }
+
+    private void Noop()
+    {
+    }
+
+    private async Task ClearSuppressClickAsync()
+    {
+        await Task.Delay(250);
+        _suppressClick = false;
+    }
+
+    /// <summary>
+    /// Global shortcut handler. Rotation order (clockwise): right → down → left → up → right;
+    /// Shift reverses it. Returns true when the key was consumed (caller preventDefaults).
+    /// </summary>
+    private Task<bool> OnGlobalKey(string key, bool shiftKey)
+    {
+        switch (key)
+        {
+            case "Escape":
+                CloseRadial();
+                _selectedIndex = -1;
+                return Task.FromResult(true);
+
+            case "Delete":
+            case "Backspace":
+                if (_selectedIndex >= 0)
+                {
+                    DeleteTrigger(_selectedIndex);
+                    StateHasChanged();
+                    return Task.FromResult(true);
+                }
+                return Task.FromResult(false);
+
+            case "r":
+            case "R":
+                if (SelectedIsDirectional)
+                {
+                    RotateSelected(shiftKey);
+                    StateHasChanged();
+                    return Task.FromResult(true);
+                }
+                return Task.FromResult(false);
+
+            default:
+                return Task.FromResult(false);
+        }
+    }
+
+    // --- display -------------------------------------------------------------
+
+    private static string TypeClass(string type) => $"t-{type}";
+
+    private static string Glyph(string type) => type switch
+    {
+        ChartTriggerTypes.Left => "◀",
+        ChartTriggerTypes.Right => "▶",
+        ChartTriggerTypes.Up => "▲",
+        ChartTriggerTypes.Down => "▼",
+        _ => "●",
+    };
+
+    private double TriggerWidth(ChartTrigger t) =>
+        t.Type == ChartTriggerTypes.Hold ? Math.Max(14, (t.DurationBeats ?? SnapBeats) * Ppb) : 26;
+
+    private void ZoomBy(int direction)
+    {
+        _zoom = Math.Clamp(_zoom + direction * 0.25, 0.25, 4.0);
+    }
+
+    // --- playback preview ----------------------------------------------------
+
+    private async Task PlayAsync()
+    {
+        if (_song is null)
+        {
+            return;
+        }
+        _error = "";
+        await _audio.InitAsync();
+        _player = new SongPlayer(_audio, _song);
+        await _player.StartAsync();
+        _isPlaying = true;
+        _pollTimer?.Start();
+    }
+
+    private async Task StopAsync()
+    {
+        _isPlaying = false;
+        _currentBeat = 0;
+        _pollTimer?.Stop();
+        if (_player is not null)
+        {
+            await _player.StopAsync();
+        }
+        else
+        {
+            await _audio.ClearScheduledAsync();
+            await _audio.StopTransportAsync();
+        }
+        await _audio.SeekTransportAsync(0);
+    }
+
+    private async Task PollAsync()
+    {
+        try
+        {
+            await InvokeAsync(async () =>
+            {
+                if (!_isPlaying)
+                {
+                    return;
+                }
+                var seconds = await _audio.GetTransportTimeSecAsync();
+                _currentBeat = TimingService.SecondsToBeats(seconds, _song?.Bpm ?? 120);
+                StateHasChanged();
+            });
+        }
+        catch (JSException)
+        {
+        }
+    }
+
+    // --- save / download / load ---------------------------------------------
+
+    private Chart BuildChart() => new()
+    {
+        Id = Guid.TryParse(_chartId, out var g) ? g : Guid.NewGuid(),
+        SongId = _songId,
+        Title = _title,
+        Difficulty = _difficulty,
+        Triggers = _triggers.ToList(),
+    };
+
+    private async Task SaveChartAsync()
+    {
+        if (!_auth.IsUnlocked)
+        {
+            _pendingSave = true;
+            _promptOpen = true;
+            return;
+        }
+        await DoSaveAsync();
+    }
+
+    private async Task DoSaveAsync()
+    {
+        _error = "";
+        try
+        {
+            var id = await Charts.SaveAsync(BuildChart());
+            _chartId = id;
+            ShowStatus($"Saved chart '{_title}'.");
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task OnPromptUnlocked()
+    {
+        _promptOpen = false;
+        if (_pendingSave)
+        {
+            _pendingSave = false;
+            await DoSaveAsync();
+        }
+    }
+
+    private void OnPromptCancelled()
+    {
+        _promptOpen = false;
+        _pendingSave = false;
+    }
+
+    private async Task DownloadChartAsync()
+    {
+        var json = await ChartSerializer.ToJsonStringAsync(BuildChart());
+        var safe = string.IsNullOrWhiteSpace(_title) ? "chart" : _title;
+        safe = string.Concat(safe.Select(c => char.IsLetterOrDigit(c) ? c : '-'));
+        await Downloader.DownloadTextAsync($"{safe}.chart.json", json);
+    }
+
+    private async Task LoadChartAsync(InputFileChangeEventArgs e)
+    {
+        _error = "";
+        try
+        {
+            await using var stream = e.File.OpenReadStream(maxAllowedSize: 16 * 1024 * 1024);
+            var chart = await ChartSerializer.LoadAsync(stream);
+            _chartId = chart.Id.ToString();
+            _songId = chart.SongId;
+            _title = chart.Title;
+            _difficulty = chart.Difficulty;
+            _triggers = chart.Triggers.ToList();
+            _selectedIndex = -1;
+            CloseRadial();
+            await LoadSongAsync();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private void ShowStatus(string message)
+    {
+        _status = message;
+        var version = ++_statusVersion;
+        _ = ClearStatusAfterDelayAsync(version);
+    }
+
+    private async Task ClearStatusAfterDelayAsync(int version)
+    {
+        await Task.Delay(2000);
+        if (version != _statusVersion)
+        {
+            return;
+        }
+        _status = "";
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _pollTimer?.Dispose();
+        if (_keyboard is not null)
+        {
+            await _keyboard.DisposeAsync();
+        }
+        _keyRef?.Dispose();
+        await _audio.DisposeAsync();
+    }
+}

@@ -3,10 +3,13 @@
 @using RiffGame.Components
 @using RiffGame.Game
 @using RiffGame.Interop
+@using RiffGame.Services
 @using RiffGame.Songs
 @implements IAsyncDisposable
 @inject IJSRuntime JS
 @inject NavigationManager Navigation
+@inject SongLibrary Library
+@inject LibraryAuth _auth
 
 <PageTitle>Compose · RiffGame</PageTitle>
 
@@ -34,6 +37,7 @@
             Load
             <InputFile OnChange="LoadAsync" accept=".json" style="display:none" />
         </label>
+        <button class="btn btn-accent" @onclick="SaveToLibraryAsync" title="Save to browser library">Save to Library</button>
 
         <button class="btn" @onclick="CopySelection" title="Copy selection (Ctrl+C)">Copy</button>
         <button class="btn" @onclick="PasteClipboard" title="Paste staircase (Ctrl+V)">Paste</button>
@@ -124,6 +128,8 @@
                    OnAuditionStarted="AuditionStart"
                    OnAuditionStopped="AuditionStop" />
     </div>
+
+    <PasswordPrompt Visible="_promptOpen" OnUnlocked="OnPromptUnlocked" OnCancel="OnPromptCancelled" />
 </div>
 
 @code {
@@ -135,6 +141,9 @@
     private int _revision;
     private string _error = "";
     private readonly Dictionary<Guid, (double Beat, int Midi)> _dragOriginals = new();
+    private int _statusVersion;
+    private bool _promptOpen;
+    private string? _pendingAction;
 
     private const int UndoLimit = 100;
     private readonly List<Song> _undo = [];
@@ -151,12 +160,131 @@
 
     private double CurrentSeconds => TimingService.BeatsToSeconds(_state.CurrentBeat, _state.Bpm);
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
         _audio = new AudioInterop(JS, Navigation);
         _downloader = new DownloadInterop(JS, Navigation);
         _playTimer = new System.Timers.Timer(33) { AutoReset = true };
         _playTimer.Elapsed += async (_, _) => await PollAsync();
+
+        await LoadFromQueryAsync();
+    }
+
+    /** Loads a song from the library when navigated to as /compose?load={id}. */
+    private async Task LoadFromQueryAsync()
+    {
+        var id = GetQueryValue(Navigation.Uri, "load");
+        if (string.IsNullOrEmpty(id))
+        {
+            return;
+        }
+
+        var song = await Library.LoadAsync(id);
+        if (song is null)
+        {
+            _error = "That song could not be found in the library.";
+            return;
+        }
+
+        _state.LoadSong(song);
+        _undo.Clear();
+        _redo.Clear();
+        _dragOriginals.Clear();
+        _clipboard.Clear();
+        _pasteCount = 0;
+        _status = "";
+        _dragSnapshotTaken = false;
+        _resizeSnapshotTaken = false;
+        _revision++;
+    }
+
+    private async Task SaveToLibraryAsync()
+    {
+        // Saving mutates the library, so it is password-gated for this session.
+        if (!_auth.IsUnlocked)
+        {
+            _pendingAction = "save";
+            _promptOpen = true;
+            return;
+        }
+        await DoSaveToLibraryAsync();
+    }
+
+    private async Task DoSaveToLibraryAsync()
+    {
+        _error = "";
+        try
+        {
+            var id = await Library.SaveAsync(_state.WorkingSong);
+            if (Guid.TryParse(id, out var guid))
+            {
+                // Keep the id on the working song so the next save overwrites it.
+                _state.WorkingSong = _state.WorkingSong with { Id = guid };
+            }
+            ShowStatus($"Saved as '{_state.WorkingSong.Title}'.");
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task OnPromptUnlocked()
+    {
+        _promptOpen = false;
+        var action = _pendingAction;
+        _pendingAction = null;
+        if (action == "save")
+        {
+            await DoSaveToLibraryAsync();
+        }
+    }
+
+    private void OnPromptCancelled()
+    {
+        _promptOpen = false;
+        _pendingAction = null;
+    }
+
+    /** Shows a status message that fades itself out after ~2 seconds. */
+    private void ShowStatus(string message)
+    {
+        _status = message;
+        var version = ++_statusVersion;
+        _ = ClearStatusAfterDelayAsync(version);
+    }
+
+    private async Task ClearStatusAfterDelayAsync(int version)
+    {
+        await Task.Delay(2000);
+        if (version != _statusVersion)
+        {
+            return;
+        }
+        _status = "";
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private static string? GetQueryValue(string uri, string key)
+    {
+        var question = uri.IndexOf('?');
+        if (question < 0)
+        {
+            return null;
+        }
+
+        foreach (var pair in uri[(question + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = pair.IndexOf('=');
+            var name = eq < 0 ? pair : pair[..eq];
+            if (!string.Equals(name, key, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            var value = eq < 0 ? "" : pair[(eq + 1)..];
+            return Uri.UnescapeDataString(value);
+        }
+        return null;
     }
 
     private void SelectInstrument(string instrument)

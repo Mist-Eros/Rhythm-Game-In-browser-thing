@@ -1,0 +1,149 @@
+@page "/library/song/{Id}"
+@using RiffGame.Services
+@using RiffGame.Songs
+@inject SongLibrary Songs
+@inject ChartLibrary Charts
+@inject NavigationManager Navigation
+@inject LibraryAuth _auth
+
+<PageTitle>Song · RiffGame</PageTitle>
+
+<div class="library-page">
+    <a class="btn" href="library">← Back to library</a>
+
+    @if (_loading)
+    {
+        <div class="library-empty text-dim">Loading…</div>
+    }
+    else if (_song is null)
+    {
+        <div class="library-empty text-dim">Song not found.</div>
+    }
+    else
+    {
+        <div class="song-detail-header">
+            <div>
+                <h1 class="library-title">@(_song.Title.Length == 0 ? "Untitled" : _song.Title)</h1>
+                <div class="text-dim">@_song.Bpm.ToString("0") BPM · @Bars() bar(s)</div>
+            </div>
+            <span class="spacer"></span>
+            <button class="btn btn-accent" @onclick="NewChart">+ New Chart</button>
+        </div>
+
+        @if (_charts.Count == 0)
+        {
+            <div class="library-empty text-dim">No charts yet — click New Chart to start.</div>
+        }
+        else
+        {
+            <div class="library-grid">
+                @foreach (var chart in _charts)
+                {
+                    var title = string.IsNullOrWhiteSpace(chart.Title) ? "Untitled chart" : chart.Title;
+                    <div class="song-card">
+                        <div class="song-card-title">@title</div>
+                        <div class="song-card-meta">
+                            <span>@chart.Difficulty</span>
+                            <span>@chart.TriggerCount trigger(s)</span>
+                        </div>
+                        <div class="song-card-actions">
+                            <button class="btn btn-accent" @onclick="() => EditChart(chart.Id)">Edit</button>
+                            @if (_confirmId == chart.Id)
+                            {
+                                <button class="btn btn-danger" @onclick="() => ConfirmDeleteAsync(chart.Id)">Sure?</button>
+                            }
+                            else
+                            {
+                                <button class="btn" @onclick="() => RequestDelete(chart.Id)">Delete</button>
+                            }
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    }
+
+    <PasswordPrompt Visible="_promptOpen" OnUnlocked="OnPromptUnlocked" OnCancel="OnPromptCancelled" />
+</div>
+
+@code {
+    [Parameter] public string Id { get; set; } = "";
+
+    private bool _loading = true;
+    private Song? _song;
+    private List<ChartSummary> _charts = [];
+    private string? _confirmId;
+    private bool _promptOpen;
+    private string? _pendingDeleteId;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _loading = true;
+        _song = await Songs.LoadAsync(Id);
+        _charts = await Charts.ListBySongAsync(Id);
+        _loading = false;
+    }
+
+    private int Bars()
+    {
+        if (_song is null || _song.BeatsPerBar <= 0)
+        {
+            return 0;
+        }
+        var length = 0.0;
+        foreach (var track in _song.Tracks)
+        {
+            foreach (var note in track.Notes)
+            {
+                var end = note.Beat + note.Duration;
+                if (end > length)
+                {
+                    length = end;
+                }
+            }
+        }
+        return (int)Math.Ceiling(length / _song.BeatsPerBar);
+    }
+
+    private void NewChart() => Navigation.NavigateTo($"chart-editor?songId={Uri.EscapeDataString(Id)}");
+
+    private void EditChart(string chartId) =>
+        Navigation.NavigateTo($"chart-editor?songId={Uri.EscapeDataString(Id)}&chartId={Uri.EscapeDataString(chartId)}");
+
+    private void RequestDelete(string id) => _confirmId = id;
+
+    private async Task ConfirmDeleteAsync(string id)
+    {
+        _confirmId = null;
+        if (!_auth.IsUnlocked)
+        {
+            _pendingDeleteId = id;
+            _promptOpen = true;
+            return;
+        }
+        await DoDeleteAsync(id);
+    }
+
+    private async Task DoDeleteAsync(string id)
+    {
+        await Charts.DeleteAsync(id);
+        _charts = await Charts.ListBySongAsync(Id);
+    }
+
+    private async Task OnPromptUnlocked()
+    {
+        _promptOpen = false;
+        var id = _pendingDeleteId;
+        _pendingDeleteId = null;
+        if (id is not null)
+        {
+            await DoDeleteAsync(id);
+        }
+    }
+
+    private void OnPromptCancelled()
+    {
+        _promptOpen = false;
+        _pendingDeleteId = null;
+    }
+}

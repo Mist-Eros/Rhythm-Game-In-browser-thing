@@ -324,6 +324,563 @@ a {
     overflow: hidden;
     text-overflow: ellipsis;
     max-width: 280px;
+    transition: opacity 0.4s ease;
+}
+
+.btn-danger {
+    color: var(--kick);
+    border-color: var(--kick);
+}
+
+.btn-danger:hover {
+    color: var(--kick);
+    border-color: var(--kick);
+    box-shadow: 0 0 12px var(--kick);
+}
+
+/* ---- library ---- */
+
+.library-page {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+}
+
+.library-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.library-title {
+    margin: 0;
+    font-size: 1.6rem;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+}
+
+.library-empty {
+    padding: 3rem 1rem;
+    text-align: center;
+}
+
+.library-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 1rem;
+}
+
+.song-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 1rem;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.song-card:hover {
+    border-color: var(--border-bright);
+}
+
+.song-card-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--text);
+}
+
+.song-card-meta {
+    display: flex;
+    gap: 0.75rem;
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.song-card-updated {
+    font-size: 11px;
+}
+
+.song-card-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.35rem;
+}
+
+/* ---- password prompt modal ---- */
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(4, 4, 10, 0.75);
+    animation: modalFadeIn 0.15s ease both;
+}
+
+.modal {
+    width: min(360px, 90vw);
+    padding: 1.25rem;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-bright);
+    border-radius: 6px;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
+    animation: modalFadeIn 0.15s ease both;
+}
+
+.modal-title {
+    margin: 0 0 0.35rem;
+    font-size: 1.1rem;
+    letter-spacing: 0.04em;
+    color: var(--accent);
+}
+
+.modal-text {
+    margin: 0 0 1rem;
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
+.modal-input {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--text);
+    background: var(--bg-panel-2);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 0.5rem 0.6rem;
+    outline: none;
+    box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 40%, transparent);
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.modal-input.error {
+    border-color: var(--kick);
+    box-shadow: 0 0 14px var(--kick);
+}
+
+.modal-input.success {
+    border-color: #26b050;
+    box-shadow: 0 0 14px #26b050;
+}
+
+.modal-input.shake {
+    animation: modalShake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}
+
+.modal-error {
+    margin-top: 0.4rem;
+    font-size: 11px;
+    color: var(--kick);
+}
+
+.modal-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    margin-top: 1rem;
+}
+
+@keyframes modalFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes modalShake {
+    10%, 90% { transform: translateX(-2px); }
+    20%, 80% { transform: translateX(4px); }
+    30%, 50%, 70% { transform: translateX(-8px); }
+    40%, 60% { transform: translateX(8px); }
+}
+
+/* ---- song detail ---- */
+
+.song-detail-header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin: 1.25rem 0 1.5rem;
+}
+
+.song-card-link {
+    color: var(--text);
+    text-decoration: none;
+}
+
+.song-card-link:hover {
+    color: var(--accent);
+}
+
+/* ---- chart editor ---- */
+
+.chart-editor {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+}
+
+.chart-topbar,
+.chart-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0 0.9rem;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex: 0 0 auto;
+}
+
+.chart-topbar {
+    height: 48px;
+}
+
+.chart-toolbar {
+    height: 44px;
+    background: var(--bg-panel-2);
+}
+
+.chart-song-title {
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: var(--accent);
+    white-space: nowrap;
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tool-label {
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+.tool-sep {
+    width: 1px;
+    height: 20px;
+    background: var(--border-bright);
+    margin: 0 0.25rem;
+    flex: 0 0 1px;
+}
+
+.chart-topbar input,
+.chart-topbar select {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text);
+    background: var(--bg-panel-2);
+    border: 1px solid var(--border-bright);
+    border-radius: 4px;
+    padding: 0.3rem 0.5rem;
+}
+
+.chart-name {
+    min-width: 180px;
+}
+
+.chart-difficulty {
+    width: 120px;
+}
+
+.chart-toolbar .btn-mini.active {
+    color: var(--accent);
+    border-color: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+}
+
+/* Single horizontal scroller; only the timeline scrolls horizontally. */
+.chart-timeline-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    background: var(--bg);
+}
+
+/* Vertical flex stack: ruler (fixed), lanes (grow), divider (fixed), reference (grow). */
+.chart-content {
+    position: relative;
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ---- ruler ---- */
+
+.chart-ruler {
+    position: relative;
+    flex: 0 0 22px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border-bright);
+}
+
+.ruler-bar-label {
+    position: absolute;
+    top: 4px;
+    transform: translateX(3px);
+    font-size: 10px;
+    color: var(--text-dim);
+    pointer-events: none;
+}
+
+.ruler-beat-tick {
+    position: absolute;
+    bottom: 0;
+    width: 1px;
+    height: 5px;
+    background: var(--border-bright);
+    pointer-events: none;
+}
+
+/* ---- lanes (grow to fill remaining space) ---- */
+
+.chart-lanes {
+    position: relative;
+    flex: 6 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-bottom: 1px solid var(--border-bright);
+}
+
+.chart-lane {
+    position: relative;
+    flex: 1 1 0;
+    min-height: 0;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+}
+
+.chart-lane:last-child {
+    border-bottom: none;
+}
+
+.chart-lane.alt {
+    background: #101019;
+}
+
+.lane-number {
+    position: absolute;
+    left: 4px;
+    top: 50%;
+    z-index: 3;
+    padding: 0 2px;
+    transform: translateY(-50%);
+    font-size: 10px;
+    color: var(--text-dim);
+    background: rgba(10, 10, 18, 0.6);
+    pointer-events: none;
+}
+
+.chart-gridline {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 1;
+    width: 1px;
+    pointer-events: none;
+}
+
+.chart-gridline.sub {
+    background: var(--border);
+    opacity: 0.5;
+}
+
+.chart-gridline.beat {
+    background: var(--border-bright);
+}
+
+.chart-gridline.bar {
+    width: 1.5px;
+    background: var(--accent);
+    opacity: 0.5;
+}
+
+/* ---- triggers ---- */
+
+.chart-trigger {
+    position: absolute;
+    top: 6px;
+    z-index: 5;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: calc(100% - 12px);
+    min-height: 8px;
+    border: 1px solid var(--border-bright);
+    border-radius: 5px;
+    background: var(--bg-panel-2);
+    color: var(--text);
+    cursor: grab;
+    user-select: none;
+}
+
+.chart-trigger.selected {
+    outline: 2px solid #ffffff;
+    outline-offset: 1px;
+}
+
+.chart-trigger.t-tap {
+    background: transparent;
+    border-color: transparent;
+}
+
+.chart-trigger.t-hold {
+    background: rgba(110, 231, 183, 0.18);
+    border-color: #6ee7b7;
+    cursor: ew-resize;
+}
+
+.chart-trigger.t-left,
+.chart-trigger.t-right,
+.chart-trigger.t-up,
+.chart-trigger.t-down {
+    background: rgba(255, 140, 66, 0.2);
+    border-color: #ff8c42;
+}
+
+.glyph-tap {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+}
+
+.glyph-hold {
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    top: 50%;
+    height: 4px;
+    transform: translateY(-50%);
+    border-radius: 2px;
+    background: #6ee7b7;
+    pointer-events: none;
+}
+
+.glyph-dir {
+    font-size: 15px;
+    color: #ff8c42;
+    text-shadow: 0 0 8px #ff8c42;
+    pointer-events: none;
+}
+
+.chart-resize-handle {
+    position: absolute;
+    right: -3px;
+    top: 0;
+    bottom: 0;
+    width: 8px;
+    background: transparent;
+    cursor: col-resize;
+}
+
+/* ---- song reference divider + strip (grow to fill remaining space) ---- */
+
+.chart-divider {
+    position: relative;
+    flex: 0 0 22px;
+    background: var(--bg-panel-2);
+    border-top: 1px solid var(--border-bright);
+    border-bottom: 1px solid var(--border-bright);
+}
+
+.chart-divider span {
+    position: sticky;
+    left: 0;
+    display: inline-block;
+    padding: 3px 8px;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    background: var(--bg-panel-2);
+}
+
+.chart-reference {
+    position: relative;
+    flex: 4 1 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--bg-panel);
+}
+
+.ref-tick {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 2px;
+    background: #6a6a80;
+    opacity: 0.7;
+}
+
+.ref-tick.strong {
+    background: #a0a0c0;
+    opacity: 0.95;
+}
+
+/* ---- playhead spans ruler + lanes + divider + reference ---- */
+
+.chart-playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 10;
+    width: 2px;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+    pointer-events: none;
+}
+
+/* ---- radial menu ---- */
+
+.radial {
+    position: absolute;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px;
+    transform: translate(-50%, -50%);
+    background: var(--bg-panel);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    box-shadow: 0 0 16px var(--accent);
+}
+
+.radial-row {
+    display: flex;
+    gap: 4px;
+}
+
+.radial-btn {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text);
+    background: var(--bg-panel-2);
+    border: 1px solid var(--border-bright);
+    border-radius: 4px;
+    padding: 4px 8px;
+    cursor: pointer;
+}
+
+.radial-btn:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
 }
 
 .editor-main {
